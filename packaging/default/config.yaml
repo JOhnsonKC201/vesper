@@ -1,0 +1,79 @@
+# Vesper configuration.
+#
+# This file is the factory default and is tracked in git. Your live settings
+# live in config.yaml at the project root, which is created from this on first
+# run and is gitignored. Edit that one, not this one.
+
+identity:
+  name: Vesper
+  # Used in the system prompt so Vesper can address you naturally.
+  user: Johnson
+  # Both are accepted. Whisper mishearings (Vespa, Whisper, Jasper) are handled
+  # in vesper/wake.py, so you do not need to enunciate.
+  wake_words: [vesper, jarvis]
+  # Free text appended to the persona. This is the dial for how it feels.
+  # Try: "Be a little sardonic. Never say sorry twice in one conversation."
+  personality: ""
+
+brain:
+  executable: claude
+  # sonnet is the right trade for conversation. opus is slower to first word,
+  # which is very noticeable when you are waiting for a voice to start.
+  model: sonnet
+  # Blank means your home directory, which gives Claude reach across projects.
+  cwd: ""
+  add_dirs: []
+  tools: [Bash, Read, Grep, Glob, WebSearch]
+  turn_timeout_s: 180
+  # Resume the previous conversation on startup, so it remembers yesterday.
+  # Bounded because a resumed session carries its whole history with it: past
+  # this age a fresh conversation is cheaper and faster than the continuity is
+  # worth. Delete var/session.json to forget on demand.
+  remember_across_restarts: true
+  remember_max_age_hours: 12
+
+voice:
+  # piper is local and neural. sapi is the Windows built-in fallback, always
+  # available, noticeably robotic. none disables speech entirely.
+  engine: piper
+  model: en_GB-alan-medium
+  voices_dir: var/voices
+  # Piper's natural pace reads slightly slow for conversation.
+  speed: 1.15
+  volume: 0.9
+  sapi_voice_hint: ""
+
+listening:
+  # null uses the system default input. Run `python -m vesper.main --devices`
+  # to list microphones by index.
+  device: null
+  # base.en is the latency choice: about 0.4s for a 2.5s clip on CPU. Use
+  # small.en or large-v3-turbo if you want accuracy on proper nouns and can
+  # accept the wait.
+  whisper_model: base.en
+  wake_required: true
+  # After Vesper answers, plain speech counts as a reply for this long, so you
+  # are not saying its name before every sentence.
+  follow_up_window_s: 25
+  # The most-felt number in the whole app. Lower feels snappier and cuts you
+  # off mid-thought; higher feels patient and adds a dead beat to every turn.
+  end_silence_ms: 700
+  max_utterance_s: 30
+  # Set true if you use laptop speakers in a loud room. Vesper goes deaf while
+  # speaking, which loses barge-in but removes any chance of it hearing itself.
+  half_duplex: false
+  barge_in_blocks: 3
+  self_mute_ms: 250
+
+proactive:
+  # Vesper speaks up unprompted about things worth knowing. It asks Claude
+  # whether a change is worth interrupting for, and stays quiet unless it is.
+  enabled: true
+  check_interval_s: 120
+  # Never more than one unprompted remark in this window.
+  min_interval_s: 900
+  quiet_hours: "23:30-08:00"
+
+ui:
+  greet_on_start: true
+  show_cost: true

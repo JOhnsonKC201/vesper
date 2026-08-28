@@ -1,0 +1,13 @@
+# Your live settings. The tracked default is packaging/default/config.yaml.
+/config.yaml
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime state: downloaded voice models (63MB each), the resumable Claude
+# session id, rendered audio. All machine-local, none of it belongs in git.
+/var/

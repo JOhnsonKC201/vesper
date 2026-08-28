@@ -1,0 +1,4 @@
+# Speech out. Kept separate so a piper wheel failure cannot block the core
+# install; vesper/tts/sapi.py is the always-available fallback.
+piper-tts>=1.2.0
+onnxruntime>=1.17

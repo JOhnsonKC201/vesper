@@ -1,0 +1,23 @@
+# Core loop
+sounddevice>=0.5.0
+numpy>=1.26
+pyyaml>=6.0
+
+# Speech in (models already cached at ~/.cache/huggingface/hub)
+faster-whisper>=1.1.0
+# Both pins exist because Windows Application Control on this machine blocks
+# the newer wheels: "DLL load failed ... An Application Control policy has
+# blocked this file". The culprit is PyAV's native libs (faster-whisper imports
+# av eagerly even when you only ever hand it numpy arrays). These versions are
+# already trusted here. Do not float either without confirming a model loads.
+ctranslate2==4.7.2
+av==17.0.1
+silero-vad>=5.1
+
+# Machine awareness
+psutil>=6.0
+pywin32>=306 ; sys_platform == "win32"
+
+# Input + terminal UI
+pynput>=1.7.6
+rich>=13.7
