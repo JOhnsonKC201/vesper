@@ -29,6 +29,7 @@ from .brain.claude import BrainConfig, ClaudeBrain
 from .brain.persona import build_system_prompt
 from .brain.session_store import SessionStore
 from .conversation import Conversation, ConversationConfig
+from .learning import Lessons
 from .logfile import LogFile, attach
 from .proactive import ProactiveConfig, ProactiveLoop
 from .stt.voiceprint import VoicePrint
@@ -136,6 +137,12 @@ def build(cfg: config_module.Config, *, with_mic: bool = True):
     log = LogFile(cfg.log_path())
     attach(ui, log)
 
+    # Built before the brain, because what he has learned goes into the
+    # system prompt and the prompt is fixed for the life of the process.
+    lessons = Lessons(cfg.lessons_path())
+    if lessons.active():
+        ui.info(lessons.summary())
+
     voice, voice_label = build_voice(cfg, ui)
     speaker = Speaker(voice, on_start=ui.spoke, on_error=lambda e: ui.error(str(e)))
 
@@ -145,7 +152,7 @@ def build(cfg: config_module.Config, *, with_mic: bool = True):
             model=cfg.brain.model,
             cwd=cfg.brain_cwd(),
             system_prompt=build_system_prompt(
-                cfg.identity.user, cfg.identity.personality
+                cfg.identity.user, cfg.identity.personality, lessons.prompt_block()
             ),
             tools=tuple(cfg.brain.tools),
             allowed_tools=tuple(cfg.brain.allowed_tools),
@@ -211,6 +218,9 @@ def build(cfg: config_module.Config, *, with_mic: bool = True):
         ui=ui,
     )
     conversation.session_store = store if cfg.brain.remember_across_restarts else None
+    # The same store the prompt was built from, so "forget that" removes the
+    # line Claude was actually given rather than a second copy of it.
+    conversation.lessons = lessons if cfg.runtime.lessons else None
     conversation.voiceprint = VoicePrint(cfg.voiceprint_path())
     conversation.log = log
 

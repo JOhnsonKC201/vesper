@@ -383,6 +383,43 @@ session drags its whole history along and eventually a fresh start is cheaper
 and faster than the continuity is worth. Delete `var/session.json` to forget on
 demand.
 
+### And it keeps corrections past that
+
+The session above expires. "Stop reading me file paths" should not.
+
+When you tell Vesper how you want something done, that instruction is written
+to `var/lessons.json` and put in front of Claude at the start of every future
+session. The behaviour changes permanently because of something you said once.
+
+```
+"Vesper, from now on keep replies under two sentences"
+    ->  "I'll remember that."   and the reply is short from then on, forever
+```
+
+Say "forget that" to drop the last one, or "forget everything" to clear it.
+Both are handled locally and never reach Claude, for the same reason mute and
+undo are: the moment you want something forgotten is not the moment to depend
+on a network call.
+
+This is not machine learning and calling it that would be a lie. Nothing trains
+and no weight moves. It is a durable instruction list with two rules that stop
+it going wrong:
+
+**A correction has to be repeated.** "Remember that", "from now on", "always",
+"never" and "don't" are unambiguous and count immediately. "No, I meant..." is
+a much weaker signal, so it is stored but kept out of the prompt until it has
+happened twice. A single "no" in a noisy transcript should not become a
+permanent rule.
+
+**The negation has to survive.** "Don't read me file paths" would capture as
+"read me file paths" if you strip the trigger word and stop thinking, and the
+stored rule would then cause the exact behaviour that was complained about,
+with nothing about the stored line looking wrong. There is a test for it.
+
+Twelve lessons reach the prompt, most-repeated first, because a lesson you have
+had to give three times is the one least able to afford being buried in a long
+prompt. Everything is one readable JSON file you can open and edit.
+
 ---
 
 ## What it may and may not do

@@ -97,9 +97,20 @@ CHANGING THINGS
 {extra}"""
 
 
-def build_system_prompt(user: str = "the user", extra: str = "") -> str:
-    """Assemble the persona. `extra` carries user-configured personality notes."""
-    return SYSTEM_PROMPT.format(user=user or "the user", extra=extra.strip())
+def build_system_prompt(
+    user: str = "the user", extra: str = "", lessons: str = ""
+) -> str:
+    """Assemble the persona.
+
+    `extra` carries the personality notes from config, which are static.
+    `lessons` carries what this user has corrected before, which is not: it
+    grows as they tell him things. It goes last on purpose, because an
+    instruction at the end of a long system prompt survives better than the
+    same instruction buried inside the character description.
+    """
+    prompt = SYSTEM_PROMPT.format(user=user or "the user", extra=extra.strip())
+    lessons = (lessons or "").strip()
+    return f"{prompt}\n\n{lessons}" if lessons else prompt
 
 
 def split_channels(text: str) -> tuple[str, str]:

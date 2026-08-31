@@ -207,6 +207,9 @@ class RuntimeSettings:
     # Your enrolled voice. Blank, or never enrolled, means every voice is
     # accepted, which is exactly how it behaved before this existed.
     voiceprint: str = "var/voiceprint.json"
+    # Instructions you have given him that should outlive the session. Blank
+    # disables learning entirely and he forgets at every restart, as before.
+    lessons: str = "var/lessons.json"
 
 
 @dataclass
@@ -253,6 +256,9 @@ class Config:
 
     def voiceprint_path(self) -> Path | None:
         return self._under_root(self.runtime.voiceprint)
+
+    def lessons_path(self) -> Path | None:
+        return self._under_root(self.runtime.lessons)
 
     def voice_cache_path(self) -> Path | None:
         return self._under_root(self.voice.eleven.cache_dir)

@@ -216,6 +216,11 @@ runtime:
   # voice is accepted, exactly as before. A clearly different voice is then
   # ignored; an unsure one is still answered, and the score is logged.
   voiceprint: var/voiceprint.json
+  # Things you have told him about how you want things done, kept across
+  # restarts and put in front of Claude at the start of every session. Say
+  # "forget that" to drop the last one, "forget everything" to clear it.
+  # Blank disables it and he forgets at every restart, as he used to.
+  lessons: var/lessons.json
 
 ui:
   greet_on_start: true

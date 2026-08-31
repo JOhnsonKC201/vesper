@@ -31,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audit
+from . import audit, learning
 from .audio.mic import Microphone
 from .audio.speaker import Speaker
 from .audio.vad import EndpointConfig, Endpointer, VoiceActivity
@@ -186,6 +186,10 @@ class Conversation:
         self.echo_rejections = 0
         self._last_filler = ""
         self.proactive = None  # set by main once the ambient loop exists
+        # Instructions worth keeping across restarts. None disables it and
+        # Vesper forgets everything at every restart, as he used to.
+        self.lessons = None  # set by main when learning is on
+        self.learned = 0
         self.session_store = None  # set by main when cross-restart memory is on
         # The one thing Vesper is currently waiting to be told yes or no about.
         # At most one: stacking permission questions on someone who is talking
@@ -252,6 +256,7 @@ class Conversation:
             # boundary, and a test asserts nothing richer than int, float, str
             # or bool ever appears in it.
             "voice": str(getattr(self.speaker.voice, "name", "")),
+            "learned": len(self.lessons.items) if self.lessons is not None else 0,
         }
 
     def shutdown(self) -> None:
@@ -612,6 +617,17 @@ class Conversation:
         particular must work when Claude is unreachable, since "put it back" is
         exactly what you say when something has gone wrong.
         """
+        forget = learning.wants_forgetting(text) if self.lessons is not None else ""
+        if forget == "all":
+            count = self.lessons.forget_all()
+            self._say("Forgotten. All of it." if count else "There was nothing to forget.")
+            return True
+        if forget == "last":
+            dropped = self.lessons.forget_last()
+            self._say(f"Forgotten: {dropped.text}." if dropped
+                      else "There was nothing to forget.")
+            return True
+
         if _matches(text, _MUTE_PHRASES):
             if self.proactive is not None:
                 self.proactive.mute()
@@ -635,6 +651,39 @@ class Conversation:
             return True
         return False
 
+    def _maybe_learn(self, text: str) -> None:
+        """Keep a standing instruction, then answer it anyway.
+
+        On `respond` rather than `_on_utterance` because respond is the single
+        funnel for a turn. On the utterance path it worked by voice and
+        silently did nothing for typed input and `--say`.
+
+        It never swallows the turn: "from now on keep answers short" is both a
+        rule for later and a request for right now. It only adds a spoken
+        acknowledgement, and only when something was actually stored, because
+        saying "I'll remember that" about a line that did not reach the prompt
+        would be a lie that is impossible to notice.
+        """
+        if self.lessons is None:
+            return
+        found = learning.extract(text)
+        if found is None:
+            return
+        lesson, kind = found
+        try:
+            stored = self.lessons.learn(lesson, kind)
+        except Exception:
+            # Learning is a nicety. It must never cost a reply.
+            return
+        if stored is None:
+            return
+        self.learned += 1
+        self.ui.info(f"learned: {stored.text}")
+        # Only for instructions given outright. A correction that happened to
+        # match should change behaviour quietly rather than announce itself.
+        if kind == learning.EXPLICIT:
+            self._say("I'll remember that.")
+
     def hear(self, text: str) -> None:
         """One turn from text that is already transcribed or typed.
 
@@ -656,6 +705,7 @@ class Conversation:
 
     def respond(self, text: str) -> None:
         """One full turn: ask Claude, speak the answer as it arrives."""
+        self._maybe_learn(text)
         self.turns += 1
         self._run_turn(frame_turn(text, sensors.context_block()))
 

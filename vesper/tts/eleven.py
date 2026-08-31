@@ -58,6 +58,7 @@ from .eleven_api import DEFAULT_MODEL, SAMPLE_RATE, ElevenClient, ElevenError
 # the rest of the system is written around.
 _BLOCK_FRAMES = 1024
 
+
 def align(chunks):
     """Turn arbitrarily split PCM bytes into whole int16 samples.
 
@@ -86,6 +87,9 @@ STOCK_PHRASES: tuple[str, ...] = (
     "Quiet from now on.",
     "Back on.",
     "Shutting down.",
+    "I'll remember that.",
+    "Forgotten. All of it.",
+    "There was nothing to forget.",
     "Vesper here. I'm listening.",
     "Let me look.",
     "One moment.",
