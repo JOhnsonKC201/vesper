@@ -78,7 +78,13 @@ brain:
 
 voice:
   # piper is local and neural. sapi is the Windows built-in fallback, always
-  # available, noticeably robotic. none disables speech entirely.
+  # available, noticeably robotic. elevenlabs is a cloud voice with piper kept
+  # underneath it at all times. none disables speech entirely.
+  #
+  # elevenlabs is the one setting in this file that sends anything anywhere
+  # other than Claude. What goes is the text of Vesper's replies, which can
+  # contain the contents of your files, since he can read the whole drive.
+  # Microphone audio never goes, under any setting.
   engine: piper
   model: en_GB-alan-medium
   voices_dir: var/voices
@@ -91,6 +97,39 @@ voice:
   # same tone with no room, for headphones. Compare them with
   # `python scripts/voice_ab.py`, which writes one wav per character.
   character: jarvis
+
+  # Only read when engine is elevenlabs.
+  eleven:
+    # Leave blank here. Put the key in the gitignored config.yaml at the
+    # project root, or in VESPER_ELEVEN_API_KEY, which wins over this file so
+    # the key need not sit on disk at all.
+    api_key: ""
+    # George: British, composed, and the closest of the free voices to what
+    # the local `jarvis` character was reaching for with a filter. The
+    # dashboard picker writes its choice to var/voice-choice.json, which wins
+    # over this, so you do not have to edit a file to change voice.
+    #
+    # Measured against a free key: 18 of the 20 premade voices work, and Aria
+    # and Charlotte answer 402. Every library voice answers 402 too.
+    voice_id: JBFqnCBsd6RMkjVDRZzb
+    # Flash is half the credit cost of the standard models and the lowest
+    # latency, which is the only sensible default on a 10,000 character month.
+    model_id: eleven_flash_v2_5
+    # Deliberately under the free tier's 10,000 rather than on it, so the
+    # ceiling is found here rather than by ElevenLabs. Over the cap Vesper
+    # speaks through Piper: the voice changes, nothing breaks, no bill arrives.
+    # A reply is around 200 characters, so this is roughly 45 spoken replies a
+    # month on top of whatever comes from the cache for free.
+    monthly_characters: 9000
+    timeout_s: 20
+    cache_dir: var/voice-cache
+    budget: var/voice-budget.json
+    choice: var/voice-choice.json
+    # Synthesize the 17 phrases Vesper repeats ("One moment.", "Yes?",
+    # "Shutting down.") once at startup, then play them from disk forever.
+    # About 350 characters, paid once. They stay in the good voice even after
+    # the monthly budget is gone, and they play with no network latency.
+    prewarm: true
 
 listening:
   # null uses the system default input. Run `python -m vesper.main --devices`

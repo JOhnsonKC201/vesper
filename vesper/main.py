@@ -42,14 +42,15 @@ from .wake import WakeConfig, WakeGate
 # --- assembly ---------------------------------------------------------------
 
 
-def build_voice(cfg: config_module.Config, ui: TerminalUI):
-    """Pick a speech backend, degrading rather than failing."""
-    engine = (cfg.voice.engine or "piper").lower()
+def build_local_voice(cfg: config_module.Config, ui: TerminalUI, *, engine: str):
+    """The voice that works with the network unplugged.
 
-    if engine == "none":
-        return NullVoice(), "silent"
-
-    if engine == "piper":
+    Split out from `build_voice` because the cloud backend does not replace
+    this, it sits on top of it. `conversation.py` handles "Quiet from now on."
+    and "Shutting down." locally so they survive an outage, and that promise
+    only holds if there is always a local voice underneath.
+    """
+    if engine in ("piper", "elevenlabs"):
         from .tts.piper_voice import PiperTTS
 
         model = PiperTTS.find_voice(cfg.voices_path(), cfg.voice.model)
@@ -78,6 +79,54 @@ def build_voice(cfg: config_module.Config, ui: TerminalUI):
 
     ui.warn("no speech backend available; Vesper will be silent")
     return NullVoice(), "silent"
+
+
+def build_voice(cfg: config_module.Config, ui: TerminalUI):
+    """Pick a speech backend, degrading rather than failing."""
+    engine = (cfg.voice.engine or "piper").lower()
+
+    if engine == "none":
+        return NullVoice(), "silent"
+
+    local, label = build_local_voice(cfg, ui, engine=engine)
+    if engine != "elevenlabs":
+        return local, label
+
+    key = cfg.eleven_key()
+    if not key:
+        # Not a warning worth alarming about: it is exactly what happens
+        # between switching the engine on and pasting a key in.
+        ui.warn(f"voice.engine is elevenlabs but no API key is set; using {label}")
+        return local, label
+
+    from . import voicechoice
+    from .tts import eleven
+
+    # A voice picked in the dashboard beats the one written in config.yaml,
+    # because clicking it is both more recent and more deliberate.
+    chosen = voicechoice.load(cfg.voice_choice_path())
+    settings = cfg.voice.eleven
+    try:
+        cloud = eleven.build(
+            local,
+            api_key=key,
+            voice_id=chosen.voice_id or settings.voice_id,
+            model_id=settings.model_id,
+            cache_dir=cfg.voice_cache_path(),
+            budget_path=cfg.voice_budget_path(),
+            monthly_characters=settings.monthly_characters,
+            timeout_s=settings.timeout_s,
+            log=ui.info,
+        )
+    except Exception as exc:
+        ui.warn(f"elevenlabs failed to start ({exc}); using {label}")
+        return local, label
+
+    if settings.prewarm:
+        # Off the main thread: it is a handful of network calls and the first
+        # reply must not wait for them.
+        cloud.prewarm_async()
+    return cloud, f"{cloud.name} over {label}"
 
 
 def build(cfg: config_module.Config, *, with_mic: bool = True):
@@ -202,12 +251,24 @@ def _start_tray(cfg: config_module.Config, conversation, ui):
         if path is not None and path.exists():
             os.startfile(str(path))  # noqa: S606 - opening our own log
 
+    # Only when the cloud voice is actually running. With Piper the picker
+    # would be a control with one entry and nothing to say, so it is left out
+    # of the window entirely rather than shown greyed.
+    panel = None
+    if hasattr(speaker.voice, "say_as"):
+        from .ui.voicepanel import VoicePanel
+
+        panel = VoicePanel(
+            speaker.voice, choice_path=cfg.voice_choice_path(), log=ui.info
+        )
+
     dashboard = Dashboard(
         conversation.status,
         name=cfg.identity.name,
         on_toggle=conversation.pause,
         on_open_log=open_log,
         on_quit=conversation.shutdown,
+        voices=panel,
     )
 
     tray = TrayIcon(

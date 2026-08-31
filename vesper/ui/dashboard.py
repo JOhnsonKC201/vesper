@@ -34,13 +34,18 @@ class Dashboard:
     """A live status window, opened and closed from the tray."""
 
     def __init__(self, snapshot, *, on_toggle=None, on_open_log=None,
-                 on_quit=None, name: str = "Vesper") -> None:
+                 on_quit=None, voices=None, name: str = "Vesper") -> None:
         # A callable returning a plain dict. Deliberately not the Conversation
         # itself: this thread must never touch the audio loop's state directly.
         self.snapshot = snapshot
         self._on_toggle = on_toggle or (lambda paused: None)
         self._on_open_log = on_open_log or (lambda: None)
         self._on_quit = on_quit or (lambda: None)
+        # Optional. None means no cloud voice is configured, and the whole
+        # picker is left out rather than shown as a dead control. Kept as an
+        # opaque object so this file knows nothing about ElevenLabs: it renders
+        # whatever the panel reports, the same way it renders `snapshot`.
+        self.voices = voices
         self.name = name
 
         self._thread: threading.Thread | None = None
@@ -53,6 +58,13 @@ class Dashboard:
         # to keep.
         self._wants_raise = threading.Event()
         self._wants_close = threading.Event()
+
+        # Previewing a voice is a network call that can take seconds. Doing it
+        # on the Tk thread would freeze the window, so a worker does the work
+        # and leaves a plain string here for the next tick to render. Neither
+        # side touches the other's objects.
+        self._voice_note = ""
+        self._voice_busy = threading.Event()
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -189,6 +201,9 @@ class Dashboard:
             ("voice_rejections", "not you"), ("echo_rejections", "itself"),
         ])
 
+        if self.voices is not None:
+            self._voice_section(tk, root)
+
         tk.Frame(root, bg=LINE, height=1).pack(fill="x", pady=(14, 0), **pad)
 
         buttons = tk.Frame(root, bg=NIGHT)
@@ -198,6 +213,72 @@ class Dashboard:
         self._fields["pause"].pack(side="left")
         self._button(tk, buttons, "Open log", self._on_open_log).pack(side="left", padx=8)
         self._button(tk, buttons, "Quit", self._quit, danger=True).pack(side="right")
+
+    def _voice_section(self, tk, root) -> None:
+        """The voice picker, preview and the month's remaining allowance.
+
+        `tk.OptionMenu` rather than `ttk.Combobox` because this file has no
+        `ttk` in it and one widget is not worth two look-and-feels in one
+        window. Every widget and every Tk variable made here goes into
+        `_fields`, which `_run` clears on the owning thread. A `StringVar` left
+        on `self` would outlive that and abort the process at exit, which is
+        the same failure the rest of this class is written around.
+        """
+        tk.Label(root, text="VOICE", font=("Segoe UI", 8, "bold"),
+                 bg=NIGHT, fg=MUTED, anchor="w").pack(fill="x", padx=18, pady=(12, 3))
+
+        panel = tk.Frame(root, bg=PANEL)
+        panel.pack(fill="x", padx=18)
+
+        row = tk.Frame(panel, bg=PANEL)
+        row.pack(fill="x", padx=10, pady=(9, 4))
+
+        names = [voice.label for voice in self._available()]
+        chosen = tk.StringVar(root, value=self._current_label(names))
+        self._fields["voice_var"] = chosen
+
+        menu = tk.OptionMenu(row, chosen, *(names or ["no voices"]),
+                             command=lambda _label: self._pick())
+        menu.config(bg=PANEL, fg=TEXT, activebackground=LINE, activeforeground=TEXT,
+                    relief="flat", bd=0, highlightthickness=0, font=("Segoe UI", 9),
+                    anchor="w", cursor="hand2")
+        menu["menu"].config(bg=PANEL, fg=TEXT, activebackground=LINE,
+                            activeforeground=TEXT, bd=0)
+        menu.pack(side="left", fill="x", expand=True)
+        self._fields["voice_menu"] = menu
+
+        self._fields["voice_preview"] = self._button(tk, row, "Preview", self._preview)
+        self._fields["voice_preview"].pack(side="right", padx=(8, 0))
+
+        # The allowance, drawn rather than written, because "how much is left"
+        # is a glance question. Two frames: the track and the fill.
+        track = tk.Frame(panel, bg=LINE, height=4)
+        track.pack(fill="x", padx=10, pady=(2, 2))
+        track.pack_propagate(False)
+        fill = tk.Frame(track, bg=COOL, height=4)
+        fill.place(x=0, y=0, relwidth=0.0, relheight=1.0)
+        self._fields["voice_bar"] = fill
+
+        self._fields["voice_note"] = tk.Label(
+            panel, text="", font=("Segoe UI", 8), bg=PANEL, fg=MUTED,
+            anchor="w", justify="left", wraplength=320)
+        self._fields["voice_note"].pack(fill="x", padx=10, pady=(2, 9))
+
+    def _available(self):
+        try:
+            return list(self.voices.list())
+        except Exception:
+            return []
+
+    def _current_label(self, names: list[str]) -> str:
+        try:
+            current = self.voices.current()
+        except Exception:
+            current = ""
+        for name in names:
+            if name.startswith(current):
+                return name
+        return names[0] if names else "no voices"
 
     def _counters(self, tk, root, title: str, items: list[tuple[str, str]]) -> None:
         tk.Label(root, text=title.upper(), font=("Segoe UI", 8, "bold"),
@@ -278,6 +359,9 @@ class Dashboard:
         if cost is not None:
             cost.config(text=f"${float(data.get('cost_usd') or 0.0):.2f}")
 
+        if self.voices is not None:
+            self._apply_voice()
+
     # --- actions ------------------------------------------------------------
 
     def _toggle(self) -> None:
@@ -291,5 +375,98 @@ class Dashboard:
         self._wants_close.set()
         try:
             self._on_quit()
+        except Exception:
+            pass
+
+    # --- voice --------------------------------------------------------------
+
+    def _selected_voice(self):
+        """Which voice the dropdown is showing. Runs on the Tk thread."""
+        variable = self._fields.get("voice_var")
+        if variable is None:
+            return None
+        try:
+            label = variable.get()
+        except Exception:
+            return None
+        for voice in self._available():
+            if voice.label == label:
+                return voice
+        return None
+
+    def _pick(self) -> None:
+        """Switch voice. Called from the dropdown, so on the Tk thread."""
+        voice = self._selected_voice()
+        if voice is None:
+            return
+        if not getattr(voice, "free", True):
+            self._voice_note = f"{voice.name} needs a paid ElevenLabs plan"
+            return
+        try:
+            self.voices.choose(voice.voice_id)
+            self._voice_note = f"{voice.name} it is"
+        except Exception as exc:
+            self._voice_note = f"could not switch: {type(exc).__name__}"
+
+    def _preview(self) -> None:
+        """Speak a sample line. Dispatched to a worker, never run here.
+
+        A preview is an HTTP request that can take the full timeout. Running it
+        on the Tk thread would freeze the window for twenty seconds, and the
+        worker cannot touch Tk, so it leaves a string behind for the next tick.
+        """
+        if self._voice_busy.is_set():
+            return
+        voice = self._selected_voice()
+        if voice is None:
+            return
+        if not getattr(voice, "free", True):
+            self._voice_note = f"{voice.name} needs a paid ElevenLabs plan"
+            return
+
+        self._voice_busy.set()
+        self._voice_note = f"speaking as {voice.name}..."
+        threading.Thread(
+            target=self._preview_worker, args=(voice,), daemon=True,
+            name="voice-preview",
+        ).start()
+
+    def _preview_worker(self, voice) -> None:
+        try:
+            self._voice_note = self.voices.preview(voice.voice_id) or ""
+        except Exception as exc:
+            self._voice_note = f"preview failed: {type(exc).__name__}"
+        finally:
+            self._voice_busy.clear()
+
+    def _apply_voice(self) -> None:
+        """Render the voice panel. Runs on the Tk thread, once a second."""
+        note = self._fields.get("voice_note")
+        if note is None:
+            return
+        try:
+            used, cap = self.voices.budget()
+        except Exception:
+            used, cap = 0, 0
+
+        bar = self._fields.get("voice_bar")
+        if bar is not None:
+            share = 0.0 if cap <= 0 else min(1.0, max(0.0, used / cap))
+            try:
+                bar.place_configure(relwidth=share)
+                bar.config(bg=WARN if share >= 1.0 else COOL)
+            except Exception:
+                pass
+
+        if self._voice_note:
+            text = self._voice_note
+        elif cap <= 0:
+            text = "no allowance set; speaking locally"
+        elif used >= cap:
+            text = "monthly allowance spent, speaking locally until next month"
+        else:
+            text = f"{cap - used:,} of {cap:,} characters left this month"
+        try:
+            note.config(text=text)
         except Exception:
             pass

@@ -247,6 +247,11 @@ class Conversation:
             "echo_rejections": self.echo_rejections,
             "last_heard": self._last_heard,
             "pending": self._pending.spoken() if self._pending else "",
+            # A name rather than the backend object, because every value here
+            # has to stay a scalar: the dashboard reads this across a thread
+            # boundary, and a test asserts nothing richer than int, float, str
+            # or bool ever appears in it.
+            "voice": str(getattr(self.speaker.voice, "name", "")),
         }
 
     def shutdown(self) -> None:

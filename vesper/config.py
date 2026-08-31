@@ -102,8 +102,36 @@ class BrainSettings:
 
 
 @dataclass
+class ElevenSettings:
+    """Cloud speech. Off unless a key is present, and Piper is always behind it.
+
+    Turning this on is the one place Vesper sends anything anywhere other than
+    Claude. What goes is the text of the replies, which can contain the
+    contents of your files. Microphone audio never does.
+    """
+
+    # Left blank in the packaged default on purpose. Set it in config.yaml,
+    # which is gitignored, or in VESPER_ELEVEN_API_KEY, which wins over the
+    # file so the key need not sit on disk at all.
+    api_key: str = ""
+    voice_id: str = "JBFqnCBsd6RMkjVDRZzb"  # George
+    # Half the credit cost of the standard models and the lowest latency.
+    model_id: str = "eleven_flash_v2_5"
+    # Under the free tier's 10,000 rather than on it, so the ceiling is found
+    # here rather than by ElevenLabs. Over it, Piper speaks instead.
+    monthly_characters: int = 9_000
+    timeout_s: float = 20.0
+    cache_dir: str = "var/voice-cache"
+    budget: str = "var/voice-budget.json"
+    choice: str = "var/voice-choice.json"
+    # Synthesize the stock phrases once at startup so the fillers are instant
+    # and free. About 350 characters, paid once.
+    prewarm: bool = True
+
+
+@dataclass
 class VoiceSettings:
-    engine: str = "piper"  # piper | sapi | none
+    engine: str = "piper"  # piper | sapi | elevenlabs | none
     model: str = "en_GB-alan-medium"
     voices_dir: str = "var/voices"
     speed: float = 1.15
@@ -112,6 +140,7 @@ class VoiceSettings:
     # How the voice is finished: natural, jarvis or broadcast. See
     # vesper/tts/shaping.py. `natural` is Piper untouched.
     character: str = "jarvis"
+    eleven: ElevenSettings = field(default_factory=ElevenSettings)
 
 
 @dataclass
@@ -225,6 +254,26 @@ class Config:
     def voiceprint_path(self) -> Path | None:
         return self._under_root(self.runtime.voiceprint)
 
+    def voice_cache_path(self) -> Path | None:
+        return self._under_root(self.voice.eleven.cache_dir)
+
+    def voice_budget_path(self) -> Path | None:
+        return self._under_root(self.voice.eleven.budget)
+
+    def voice_choice_path(self) -> Path | None:
+        return self._under_root(self.voice.eleven.choice)
+
+    def eleven_key(self) -> str:
+        """The ElevenLabs key, environment first.
+
+        The environment wins so the key never has to be written to disk. It is
+        read here rather than at import so a test can set it, and so rotating
+        it means restarting rather than editing code.
+        """
+        import os
+
+        return (os.environ.get("VESPER_ELEVEN_API_KEY") or self.voice.eleven.api_key or "").strip()
+
     def _under_root(self, value: str) -> Path | None:
         if not value:
             return None
@@ -255,7 +304,14 @@ def _build(cls, data: dict | None):
     for spec in fields(cls):
         if spec.name not in data:
             continue
-        kwargs[spec.name] = _coerce(getattr(blank, spec.name), data[spec.name])
+        default = getattr(blank, spec.name)
+        # A section inside a section, like voice.eleven. Without this the raw
+        # YAML dict is assigned straight onto the field, and every attribute
+        # access on it fails later at the point of use rather than here.
+        if is_dataclass(default) and not isinstance(default, type):
+            kwargs[spec.name] = _build(type(default), data[spec.name])
+        else:
+            kwargs[spec.name] = _coerce(default, data[spec.name])
     return cls(**kwargs)
 
 

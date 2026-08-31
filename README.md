@@ -143,17 +143,26 @@ the cost. It was already light.
 
 ## What leaves this machine
 
-Only your conversation with Claude, through the `claude` process, exactly as it
-would from any terminal.
+Out of the box, only your conversation with Claude, through the `claude`
+process, exactly as it would from any terminal.
 
 Everything else is local. Speech recognition is Whisper on your CPU. The voice
 is a Piper model on disk. The sensors read Windows APIs. The wake word is
-matched in memory. There is no telemetry, no cloud speech service, and no
-account anywhere but the one you already have.
+matched in memory. There is no telemetry and no account anywhere but the one
+you already have.
+
+**There is exactly one setting that changes this, and it is off by default.**
+Setting `voice.engine` to `elevenlabs` sends the text of Vesper's replies to
+ElevenLabs so they come back as speech. Those replies can quote the contents of
+your files, because Vesper can read the whole drive, so this is a real change
+rather than a technicality. Microphone audio never leaves under any setting,
+and putting `engine` back to `piper` stops all of it immediately.
 
 This is enforced, not just stated. `tests/test_privacy.py` fails the build if
-any module in `vesper/` imports a network library, opens a socket, contains a
-hardcoded URL, or spawns any process other than `claude`.
+any module in `vesper/` opens a socket, contains a hardcoded URL, or spawns any
+process other than `claude`. Exactly one file, `tts/eleven_api.py`, may import
+an HTTP client, and a test asserts that list has exactly one name on it, so a
+second cannot appear by accident.
 
 Window titles are the most revealing thing it reads unprompted, so anything
 matching password managers, banking, or incognito windows is reported as
@@ -222,6 +231,35 @@ dead silence to just over three, and it is why the numbers above are 2.0s rather
 than 4.4s.
 
 A question needing no tools answers faster: about 1.4s total.
+
+### The cloud voice, measured
+
+`voice.engine: elevenlabs` trades latency for a better voice, and the trade is
+smaller than it looks. Measured by `scripts/cloud_voice_smoke.py` on a
+70 character line:
+
+| | First audio | Charged |
+|---|---|---|
+| Piper, local | starts immediately | free |
+| ElevenLabs, cold | 519ms | 70 characters |
+| ElevenLabs, from cache | 0ms | free |
+
+The third row is why this is viable at all. The seventeen lines Vesper repeats,
+every holding phrase and every stock reply, are synthesized once and then play
+from disk. So the most latency-sensitive line in the whole system, the "one
+moment" that covers a tool call, is the one that costs nothing and arrives
+instantly. Only novel sentences pay the 519ms.
+
+The free ElevenLabs tier is 10,000 characters a month, which at roughly 200
+characters a reply is about 45 replies once the stock phrases are paid for.
+`voice.eleven.monthly_characters` caps it at 9,000 deliberately, under the free
+allowance rather than on it, so the ceiling is found here rather than by
+ElevenLabs. Past the cap Vesper speaks through Piper: the voice changes, nothing
+breaks, and no bill arrives.
+
+Two things on the free tier are refused whatever your key's permissions say:
+library voices answer 402, and creating a voice answers 403. Eighteen of the
+twenty premade voices work, and the dashboard marks the two that do not.
 
 ---
 
