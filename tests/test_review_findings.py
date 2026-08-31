@@ -257,8 +257,18 @@ def test_starting_the_tray_does_not_raise(monkeypatch, tmp_path):
     assert conversation.dashboard is not None
 
 
-def test_the_picker_is_left_out_when_the_voice_is_local(monkeypatch, tmp_path):
-    """A control with one entry and nothing to say is worse than no control."""
+def test_the_picker_is_there_for_a_local_voice_too(monkeypatch, tmp_path):
+    """It used to be left out unless the cloud voice was running.
+
+    The reason given was that a local picker would be "a control with one entry
+    and nothing to say". Both halves were wrong: each Piper model is three
+    entries, one per delivery, and every Windows install has SAPI voices
+    whether or not a model was ever downloaded. What it actually meant was that
+    the default install had no way to change voice at all short of editing
+    config.yaml and restarting, which is not a setting most people will find.
+
+    Mutation that fails this: drop the `else` branch in `_start_tray`.
+    """
     from vesper import main as main_module
 
     tray_module = types.ModuleType("vesper.ui.tray")
@@ -271,6 +281,49 @@ def test_the_picker_is_left_out_when_the_voice_is_local(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "vesper.ui.icon", icon_module)
 
     conversation, speaker, _ = _conversation(tmp_path)
+    try:
+        main_module._start_tray(
+            config_module.Config(), conversation,
+            TerminalUI(console=Console(file=io.StringIO())),
+        )
+    finally:
+        speaker.close()
+
+    from vesper.tts import catalog
+    from vesper.ui.voicepanel import LocalVoicePanel
+
+    panel = conversation.dashboard.voices
+    if not catalog.discover(config_module.Config().voices_path()):
+        # No Piper model and no SAPI. Then there really is nothing to pick.
+        assert panel is None
+        return
+
+    assert isinstance(panel, LocalVoicePanel)
+    # The Speaker, not the voice: switching a local voice means handing a
+    # newly loaded backend to the thing that owns playback.
+    assert panel.speaker is speaker
+    assert panel.list(), "the picker was wired up with nothing in it"
+
+
+def test_the_picker_is_left_out_when_vesper_is_meant_to_be_silent(monkeypatch, tmp_path):
+    """`engine: none` is a deliberate vow of silence, not a missing feature.
+
+    Mutation that fails this: drop the `NullVoice` branch in `_start_tray`.
+    """
+    from vesper import main as main_module
+    from vesper.tts.base import NullVoice
+
+    tray_module = types.ModuleType("vesper.ui.tray")
+    tray_module.TrayIcon = lambda **kw: types.SimpleNamespace(
+        start=lambda: True, update=lambda **k: None
+    )
+    monkeypatch.setitem(sys.modules, "vesper.ui.tray", tray_module)
+    icon_module = types.ModuleType("vesper.ui.icon")
+    icon_module.ensure = lambda path: {}
+    monkeypatch.setitem(sys.modules, "vesper.ui.icon", icon_module)
+
+    conversation, speaker, _ = _conversation(tmp_path)
+    speaker.voice = NullVoice()
     try:
         main_module._start_tray(
             config_module.Config(), conversation,

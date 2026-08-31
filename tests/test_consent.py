@@ -361,9 +361,9 @@ def test_a_spoken_yes_grants_exactly_that_action_and_hands_it_back():
     brain = DenyingBrain(
         request_tool="Bash", request_input={"command": "git commit -m wip"}
     )
-    conv, speaker, ui, voice = _build(brain, ["Vesper commit that", "yes"])
+    conv, speaker, ui, voice = _build(brain, ["Vesper commit that", "Vesper yes"])
     conv._on_utterance(_audio())   # refused, Vesper asks
-    conv._on_utterance(_audio())   # "yes"
+    conv._on_utterance(_audio())   # "Vesper, yes"
     _settle(speaker)
     speaker.close()
 
@@ -429,14 +429,14 @@ def test_talking_past_the_question_leaves_it_open():
     request you were two seconds from approving."""
     brain = DenyingBrain()
     conv, speaker, ui, voice = _build(
-        brain, ["Vesper save that", "did you see the game last night", "yes"]
+        brain, ["Vesper save that", "did you see the game last night", "Vesper yes"]
     )
     conv._on_utterance(_audio())
     conv.wake.disengage()
     conv._on_utterance(_audio())   # said to a colleague
     assert conv._pending is not None, "the question was thrown away by room noise"
 
-    conv.wake.engage(time.time())  # addressed again
+    conv.wake.engage(time.monotonic())  # addressed again
     conv._on_utterance(_audio())   # "yes"
     _settle(speaker)
     speaker.close()
@@ -474,7 +474,9 @@ def test_typed_input_answers_the_question_too():
 def test_every_decision_is_written_down(tmp_path):
     log = tmp_path / "actions.log"
     brain = DenyingBrain()
-    conv, speaker, _, _voice = _build(brain, ["Vesper save that", "yes"], audit_log=log)
+    conv, speaker, _, _voice = _build(
+        brain, ["Vesper save that", "Vesper yes"], audit_log=log
+    )
     conv._on_utterance(_audio())
     conv._on_utterance(_audio())
     _settle(speaker)

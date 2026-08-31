@@ -53,6 +53,35 @@ class FakePanel:
     def budget(self):
         return 1_234, 9_000
 
+    def status(self):
+        return "7,766 of 9,000 characters left this month"
+
+
+class FakeLocalPanel(FakePanel):
+    """The local picker: many rows, and no allowance, so no spend bar.
+
+    Worth soaking separately. The bar is now built only when there is a budget,
+    and a widget that exists on one path and not the other is exactly the shape
+    of mistake that leaves something outside `_fields` and finalises it on the
+    wrong thread later.
+    """
+
+    def list(self):
+        from vesper import config
+        from vesper.tts import catalog
+
+        return list(catalog.discover(config.Config().voices_path()))
+
+    def current(self):
+        rows = self.list()
+        return rows[0].label if rows else ""
+
+    def budget(self):
+        return 0, 0
+
+    def status(self):
+        return "5 voices here, and none of them need the network"
+
 
 def snapshot():
     return {
@@ -69,9 +98,13 @@ def main() -> int:
     parser.add_argument("--cycles", type=int, default=20)
     parser.add_argument("--no-voices", action="store_true",
                         help="soak without the picker, to isolate it")
+    parser.add_argument("--local", action="store_true",
+                        help="soak the local picker, which draws no spend bar")
     args = parser.parse_args()
 
-    panel = None if args.no_voices else FakePanel()
+    panel = None
+    if not args.no_voices:
+        panel = FakeLocalPanel() if args.local else FakePanel()
     print(f"opening and closing {args.cycles} times, "
           f"{'without' if panel is None else 'with'} the voice picker")
 

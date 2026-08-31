@@ -29,10 +29,18 @@ class VoiceChoice:
 
     voice_id: str = ""
     name: str = ""
+    # Which backend the id belongs to: piper, sapi or elevenlabs. Files written
+    # before the local picker existed have no engine, and an ElevenLabs id is
+    # the only thing they can contain, so blank reads as elevenlabs.
+    engine: str = ""
 
     @property
     def chosen(self) -> bool:
         return bool(self.voice_id)
+
+    @property
+    def local(self) -> bool:
+        return self.engine in ("piper", "sapi")
 
 
 def load(path: Path | str | None) -> VoiceChoice:
@@ -48,10 +56,12 @@ def load(path: Path | str | None) -> VoiceChoice:
     return VoiceChoice(
         voice_id=str(raw.get("voice_id") or ""),
         name=str(raw.get("name") or ""),
+        engine=str(raw.get("engine") or ""),
     )
 
 
-def save(path: Path | str | None, voice_id: str, name: str = "") -> bool:
+def save(path: Path | str | None, voice_id: str, name: str = "",
+         engine: str = "") -> bool:
     """Persist a choice. Returns whether it landed."""
     if not path or not voice_id:
         return False
@@ -60,7 +70,10 @@ def save(path: Path | str | None, voice_id: str, name: str = "") -> bool:
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(".tmp")
         temporary.write_text(
-            json.dumps({"voice_id": voice_id, "name": name}, indent=2),
+            json.dumps(
+                {"voice_id": voice_id, "name": name, "engine": engine},
+                indent=2,
+            ),
             encoding="utf-8",
         )
         temporary.replace(target)

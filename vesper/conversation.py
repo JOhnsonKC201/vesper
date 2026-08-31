@@ -82,9 +82,20 @@ _UNDO_PHRASES = (
 # stopping it means Task Manager, which skips the exit path entirely and leaves
 # the claude child running.
 _SHUTDOWN_PHRASES = (
-    "shut down", "shutdown", "shut yourself down", "go to sleep", "goodbye vesper",
+    "shut down", "shutdown", "shut yourself down", "goodbye vesper",
     "goodnight vesper", "good night vesper", "stop listening", "turn yourself off",
     "exit", "quit",
+)
+
+# "go to sleep" used to be in the list above, and it ended the process. Now
+# that going to sleep is a real state he spends most of his time in, the phrase
+# has to mean the state: it closes the window early rather than killing him,
+# which is what someone who has just watched him fall asleep on his own would
+# expect it to do. "Shut down" and "goodbye" still end him.
+_SLEEP_PHRASES = (
+    "go to sleep", "sleep now", "go back to sleep", "nod off", "never mind",
+    "forget it", "that's all", "thats all", "that is all", "we're done",
+    "were done", "that will be all",
 )
 
 
@@ -207,6 +218,19 @@ class Conversation:
         self._started_at = time.monotonic()
         self._last_heard = ""
         self._spoke_until = 0.0
+        # Awake means the follow-up window is open: plain speech counts as
+        # talking to Vesper, without his name. Held here as well as in the gate
+        # because the gate has no notion of *becoming* asleep, only of being
+        # asleep, and something has to notice the moment it changes.
+        self._awake = False
+        # Whether there is an exchange in progress at all. It is what tells
+        # "he finished answering you" apart from "he said the startup greeting
+        # into an empty room", and only the first of those should leave the
+        # microphone live for plain speech.
+        self._in_exchange = False
+        self._was_speaking = False
+        # Set by main when there is a tray icon to keep in step.
+        self.tray = None
         # Set by main when a profile has been enrolled. None means the
         # check is skipped entirely, which is the state before --enroll.
         self.voiceprint = None
@@ -253,6 +277,11 @@ class Conversation:
             "voice_rejections": self.voice_rejections,
             "echo_rejections": self.echo_rejections,
             "last_heard": self._last_heard,
+            # Read live rather than from `_awake`, which only moves when audio
+            # blocks arrive: typed mode has no microphone loop, and a status
+            # panel that says awake for a window that closed is worse than no
+            # panel at all.
+            "awake": self.wake.awake(time.monotonic()),
             "pending": self._pending.spoken() if self._pending else "",
             # A name rather than the backend object, because every value here
             # has to stay a scalar: the dashboard reads this across a thread
@@ -279,8 +308,15 @@ class Conversation:
         The stream stays open rather than being torn down, because reopening a
         device is where audio stacks go wrong, and because the point of pausing
         is that resuming is instant.
+
+        Pausing also puts him to sleep. Otherwise a window opened before you
+        paused is still counting behind an icon that says paused, and resuming
+        two seconds later would resume it.
         """
         self._paused = paused
+        if paused:
+            self.wake.disengage()
+            self._in_exchange = False
 
     @property
     def running(self) -> bool:
@@ -312,6 +348,10 @@ class Conversation:
             self.stop()
 
     def _handle_block(self, block: np.ndarray) -> None:
+        # Before the pause check, because a window left open when you paused
+        # still has to be seen to close.
+        self._wake_tick()
+
         if self._paused:
             # Paused from the tray. The endpointer is reset rather than left
             # holding a half collected utterance, so resuming does not finish a
@@ -322,6 +362,16 @@ class Conversation:
         speaking = self.speaker.speaking
         if speaking:
             self._spoke_until = time.monotonic()
+            self._was_speaking = True
+        elif self._was_speaking and not self._in_speech_tail():
+            # He has stopped, and his own voice has left the air. The window
+            # starts here rather than when the turn completed, because with
+            # half duplex the microphone is deaf for the whole answer: a
+            # fifteen second reply used to spend fifteen of your twenty-five
+            # seconds before you could get a word into it.
+            self._was_speaking = False
+            if self._in_exchange:
+                self.wake.engage(time.monotonic())
 
         if speaking or self._in_speech_tail():
             if self.config.half_duplex:
@@ -346,6 +396,40 @@ class Conversation:
         utterance = self.endpointer.feed(block, preroll=self.mic.preroll)
         if utterance is not None:
             self._on_utterance(utterance)
+
+    # --- awake and asleep ---------------------------------------------------
+
+    def _wake_tick(self) -> None:
+        """Notice the moment the window opens or closes. Every audio block.
+
+        Expiry is not an event anywhere. `WakeGate.engaged()` simply starts
+        returning False, so something has to look, and the audio loop is
+        already running thirty times a second: it costs a comparison, where a
+        timer would cost a thread.
+        """
+        awake = self.wake.awake(time.monotonic())
+        if awake == self._awake:
+            return
+
+        self._awake = awake
+        if not awake:
+            self._in_exchange = False
+            # Whatever he was waiting to be told yes or no about goes back to
+            # sleep with him. A question left unanswered this long is not one
+            # you still want answered by the next thing said in the room.
+            if self._pending is not None:
+                self._lapse_consent()
+
+        if self.tray is not None:
+            # On its own thread, briefly. This ends in `Shell_NotifyIcon`,
+            # which round trips to Explorer and blocks for seconds when
+            # Explorer is hung. The audio loop is the one thread that must
+            # never stall: a stalled microphone read is dropped blocks, and
+            # dropped blocks are a wake word nobody heard.
+            threading.Thread(
+                target=self.tray.update, kwargs={"awake": awake},
+                daemon=True, name="tray-awake",
+            ).start()
 
     # --- barge-in -----------------------------------------------------------
 
@@ -399,7 +483,7 @@ class Conversation:
             self.ui.discarded("heard myself")
             return
 
-        result = self.wake.check(transcript.text, time.time())
+        result = self.wake.check(transcript.text, time.monotonic())
         self.ui.heard(transcript.text, addressed=result.triggered)
         if result.triggered:
             self._last_heard = transcript.text[:80]
@@ -416,26 +500,36 @@ class Conversation:
         if not self._is_the_right_voice(audio):
             return
 
+        # Addressed to him, and in your voice: the window starts again here.
+        # This is what makes it "goes to sleep if you stop talking" rather than
+        # "goes to sleep a fixed time after he last spoke". After the voice
+        # check on purpose, so a stranger cannot hold it open.
+        self.wake.engage(time.monotonic())
+        self._awake = True
+        self._in_exchange = True
+
         text = result.text.strip()
 
-        # Asking the question engages the follow-up window, so a bare "yes"
-        # counts as addressed for the next few seconds, which is how people
-        # actually reply. After that window it takes "Vesper, yes", and the
-        # wake word is stripped before it gets here either way.
+        # A yes only approves when you said his name. Inside the window plain
+        # speech counts as talking to him, which is how people actually reply,
+        # but the one thing that still costs you his name is approving a change
+        # to the machine. The gate already reports which of the two ways in
+        # this was, so nothing new has to be tracked.
+        named = result.reason == "wake-word"
         if text and self._consent_is_live():
-            if self._settle_consent(text, echo=False):
+            if self._settle_consent(text, echo=False, named=named):
                 return
             # Addressed, and not an answer: a new question, so the old request
             # lapses rather than waiting for a yes that now means something
             # else.
             self._lapse_consent()
 
-        if self._handle_local(text):
+        if self._handle_local(text, named=named):
             return
 
         if not text:
-            # Just the name on its own. Acknowledge and open the window.
-            self.wake.engage(time.time())
+            # Just the name on its own. The window is already open, so this is
+            # only the acknowledgement.
             self._say("Yes?")
             return
 
@@ -496,6 +590,22 @@ class Conversation:
         self._last_filler = chosen
         return chosen
 
+    def volunteer(self, line: str) -> None:
+        """Say something nobody asked for, and then listen for the answer.
+
+        The proactive loop speaks through this rather than through `_say` so
+        that a remark he started opens the window: "your battery is at nine
+        percent" is worth answering with "plug it in" rather than with "Vesper,
+        plug it in".
+
+        `_say` itself must not do this. It is also how the startup greeting is
+        spoken, and an assistant that leaves the microphone live for plain
+        speech because it said hello to an empty room is exactly the accident
+        the wake word exists to prevent.
+        """
+        self._in_exchange = True
+        self._say(line)
+
     def _say(self, line: str) -> None:
         line = clean_for_speech(line)
         if not line:
@@ -547,15 +657,18 @@ class Conversation:
                 "Do I do this one for you?"
             )
         self._say(question)
-        # Keep the follow-up window open too, so a longer answer than "yes"
-        # still counts as talking to Vesper rather than near it.
-        self.wake.engage(time.time())
 
-    def _settle_consent(self, text: str, *, echo: bool = True) -> bool:
+    def _settle_consent(self, text: str, *, echo: bool = True,
+                        named: bool = True) -> bool:
         """Handle a reply to the pending question. True if it was an answer.
 
         `echo` is off for typed input, where the terminal has already shown the
         line and repeating it reads as a stutter.
+
+        `named` is whether his name was actually said. It defaults to true
+        because everything except a spoken utterance already knows who is
+        talking: typed input came from someone at the keyboard, which is a
+        stronger identity check than any voiceprint.
         """
         request = self._pending
         if request is None:
@@ -563,6 +676,27 @@ class Conversation:
         answer = hear_answer(text)
         if answer not in (YES, NO):
             return False
+
+        if answer == YES and not named:
+            # A yes that arrived only because the window happened to be open.
+            # It is treated as heard, so the request stays standing rather than
+            # lapsing, but it grants nothing: a word from the television, or
+            # from someone else in the room agreeing with something else
+            # entirely, must never be able to approve a change to the machine.
+            #
+            # A no is deliberately not held to this. Making someone say a name
+            # before they are allowed to stop something is the wrong way round,
+            # and refusing cannot cause harm.
+            if echo:
+                self.ui.heard(text, addressed=True)
+            # The wording is load bearing. `_is_own_voice` throws away anything
+            # overlapping 60% with a line just spoken, and "Vesper, yes" is two
+            # unique words, so a sentence containing both of them would swallow
+            # the very answer it asked for. It has to avoid his name and the
+            # whole agreement vocabulary: yes, sure, okay, do, it, go, ahead.
+            self._say("I'll need my name on that one.")
+            return True
+
         if echo:
             self.ui.heard(text, addressed=True)
         self._pending = None
@@ -620,13 +754,21 @@ class Conversation:
 
     # --- answering ----------------------------------------------------------
 
-    def _handle_local(self, text: str) -> bool:
+    def _handle_local(self, text: str, *, named: bool = True) -> bool:
         """Commands Vesper answers itself. True if this was one of them.
 
         None of these should cost a turn or depend on the network. Undo in
         particular must work when Claude is unreachable, since "put it back" is
         exactly what you say when something has gone wrong.
         """
+        if _matches(text, _SLEEP_PHRASES):
+            # Closing it by hand rather than waiting out the window. `_wake_tick`
+            # notices on the next audio block and tells the tray, so this needs
+            # to say nothing about the icon itself.
+            self.wake.disengage()
+            self._say("Sleeping.")
+            return True
+
         forget = learning.wants_forgetting(text) if self.lessons is not None else ""
         if forget == "all":
             count = self.lessons.forget_all()
@@ -653,6 +795,14 @@ class Conversation:
             self.undo_last()
             return True
         if _matches(text, _SHUTDOWN_PHRASES):
+            if not named:
+                # The other thing that costs you his name, and for the same
+                # reason as approving a change. "Exit" and "quit" are ordinary
+                # English, and with the window open they used to arrive here
+                # from any sentence said in the room within twenty five seconds
+                # of talking to him.
+                self._say("I'll need my name on that one.")
+                return True
             self._say("Shutting down.")
             # Let the sentence actually play before the speaker is torn down,
             # otherwise the last thing it does is cut itself off.
@@ -844,7 +994,6 @@ class Conversation:
                         spoke_at = spoke_at or time.monotonic()
                         self._say(fallback)
 
-                self.wake.engage(time.time())
                 self.ui.answered(
                     event,
                     total_s=time.monotonic() - started,

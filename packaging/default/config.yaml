@@ -96,7 +96,17 @@ voice:
   # composed delivery, a presence lift and a small room; broadcast is the
   # same tone with no room, for headphones. Compare them with
   # `python scripts/voice_ab.py`, which writes one wav per character.
+  #
+  # This and `model` above are only the starting point. The tray dashboard
+  # lists every voice on the machine, each model once per character plus
+  # whatever Windows has, and picking one there takes effect immediately and
+  # outlasts a restart.
   character: jarvis
+  # Where that pick is remembered. It wins over `model`, `character`,
+  # `sapi_voice_hint` and `eleven.voice_id`, because a click is more recent and
+  # more deliberate than a file edited last month. Delete the file to go back
+  # to what is written here.
+  choice: var/voice-choice.json
 
   # Only read when engine is elevenlabs.
   eleven:
@@ -106,7 +116,7 @@ voice:
     api_key: ""
     # George: British, composed, and the closest of the free voices to what
     # the local `jarvis` character was reaching for with a filter. The
-    # dashboard picker writes its choice to var/voice-choice.json, which wins
+    # dashboard picker writes its choice to `voice.choice` above, which wins
     # over this, so you do not have to edit a file to change voice.
     #
     # Measured against a free key: 18 of the 20 premade voices work, and Aria
@@ -124,7 +134,6 @@ voice:
     timeout_s: 20
     cache_dir: var/voice-cache
     budget: var/voice-budget.json
-    choice: var/voice-choice.json
     # Synthesize the 17 phrases Vesper repeats ("One moment.", "Yes?",
     # "Shutting down.") once at startup, then play them from disk forever.
     # About 350 characters, paid once. They stay in the good voice even after
@@ -145,15 +154,22 @@ listening:
   # and slower still.
   whisper_model: small.en
   wake_required: true
-  # After Vesper answers, plain speech counts as a reply for this long, so you
-  # are not saying its name before every sentence. Set to 0 to require the wake
-  # word on every single utterance, which is the strictest setting: nothing you
-  # say is ever acted on unless you named him first.
+  # How long he stays awake. Say his name once and plain speech counts as
+  # talking to him for this long, with the clock reset by every thing you say
+  # and again when he finishes answering, so a real back and forth keeps him
+  # awake and a pause of about half a minute puts him back to sleep.
   #
-  # It costs one thing worth knowing. Answering a permission question becomes
-  # "Vesper, yes" rather than a bare "yes", because a bare yes is no longer
-  # addressed to him. That is the trade for never being listened to by accident.
-  follow_up_window_s: 0
+  # Set to 0 to require the wake word on every single utterance, which is the
+  # strictest setting: nothing you say is ever acted on unless you named him
+  # first.
+  #
+  # Approving a change to your machine is not covered by this either way. That
+  # always takes "Vesper, yes", so nothing said near him while he is awake can
+  # grant anything. Saying "no" needs no name: stopping something should never
+  # be the harder half.
+  #
+  # The tray icon shows which he is. Warm star asleep, cool star awake.
+  follow_up_window_s: 25
   # The most-felt number in the whole app. Lower feels snappier and cuts you
   # off mid-thought; higher feels patient and adds a dead beat to every turn.
   end_silence_ms: 700

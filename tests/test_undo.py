@@ -242,7 +242,7 @@ def test_a_spoken_undo_puts_the_file_back(tmp_path):
     target = tmp_path / "notes.txt"
     target.write_text("what was there before", encoding="utf-8")
     brain = WritingBrain(target)
-    conv, speaker, ui, voice = _build(brain, ["Vesper save that", "yes"], tmp_path)
+    conv, speaker, ui, voice = _build(brain, ["Vesper save that", "Vesper yes"], tmp_path)
 
     conv._on_utterance(_audio())
     conv._on_utterance(_audio())

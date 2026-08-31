@@ -142,6 +142,16 @@ class WakeGate:
     def engaged(self, now: float) -> bool:
         return now < self._engaged_until
 
+    def awake(self, now: float) -> bool:
+        """Would plain speech, with no name in it, be acted on right now?
+
+        Not the same question as `engaged`. With `require_wake_word` off there
+        is no window at all and everything is acted on, so a status panel
+        reading `engaged` would say asleep about an assistant that is listening
+        to the whole room.
+        """
+        return not self.config.require_wake_word or self.engaged(now)
+
     def check(self, text: str, now: float) -> WakeResult:
         text = (text or "").strip()
         if not text:

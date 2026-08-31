@@ -140,6 +140,12 @@ class VoiceSettings:
     # How the voice is finished: natural, jarvis or broadcast. See
     # vesper/tts/shaping.py. `natural` is Piper untouched.
     character: str = "jarvis"
+    # Where the dashboard writes the voice you clicked. Here rather than under
+    # `eleven` because every engine can be picked in the window now, and a
+    # choice that outlives a restart should not live inside the section for the
+    # one engine that is off by default. `eleven.choice` is still read when
+    # this is blank, so files written before the move keep working.
+    choice: str = "var/voice-choice.json"
     eleven: ElevenSettings = field(default_factory=ElevenSettings)
 
 
@@ -150,8 +156,10 @@ class ListeningSettings:
     # real voice, waking on only two of nine attempts.
     whisper_model: str = "small.en"
     wake_required: bool = True
-    # 0 means the wake word is required every single time.
-    follow_up_window_s: float = 0.0
+    # How long he stays awake after you speak, with the clock reset by every
+    # thing you say. 0 means the wake word is required every single time, which
+    # is what this used to be, and it disagreed with WakeConfig's own default.
+    follow_up_window_s: float = 25.0
     end_silence_ms: int = 700
     max_utterance_s: float = 30.0
     # True by default because most people are on laptop speakers, where
@@ -267,7 +275,7 @@ class Config:
         return self._under_root(self.voice.eleven.budget)
 
     def voice_choice_path(self) -> Path | None:
-        return self._under_root(self.voice.eleven.choice)
+        return self._under_root(self.voice.choice or self.voice.eleven.choice)
 
     def eleven_key(self) -> str:
         """The ElevenLabs key, environment first.

@@ -41,10 +41,11 @@ class Dashboard:
         self._on_toggle = on_toggle or (lambda paused: None)
         self._on_open_log = on_open_log or (lambda: None)
         self._on_quit = on_quit or (lambda: None)
-        # Optional. None means no cloud voice is configured, and the whole
-        # picker is left out rather than shown as a dead control. Kept as an
-        # opaque object so this file knows nothing about ElevenLabs: it renders
-        # whatever the panel reports, the same way it renders `snapshot`.
+        # Optional. None means there is nothing to pick between at all, and
+        # then the picker is left out rather than shown as a dead control.
+        # Kept as an opaque object so this file knows nothing about ElevenLabs,
+        # Piper or SAPI: it renders whatever the panel reports, the same way it
+        # renders `snapshot`.
         self.voices = voices
         self.name = name
 
@@ -59,10 +60,12 @@ class Dashboard:
         self._wants_raise = threading.Event()
         self._wants_close = threading.Event()
 
-        # Previewing a voice is a network call that can take seconds. Doing it
-        # on the Tk thread would freeze the window, so a worker does the work
-        # and leaves a plain string here for the next tick to render. Neither
-        # side touches the other's objects.
+        # Previewing a voice is a network call, or a model load off disk, and
+        # either takes seconds. Doing it on the Tk thread would freeze the
+        # window, so a worker does the work and leaves a plain string here for
+        # the next tick to render. Neither side touches the other's objects.
+        # Switching goes the same way for the same reason: picking a local
+        # voice loads an ONNX model before it can answer.
         self._voice_note = ""
         self._voice_busy = threading.Event()
 
@@ -280,12 +283,17 @@ class Dashboard:
 
         # The allowance, drawn rather than written, because "how much is left"
         # is a glance question. Two frames: the track and the fill.
-        track = tk.Frame(panel, bg=LINE, height=4)
-        track.pack(fill="x", padx=10, pady=(2, 2))
-        track.pack_propagate(False)
-        fill = tk.Frame(track, bg=COOL, height=4)
-        fill.place(x=0, y=0, relwidth=0.0, relheight=1.0)
-        self._fields["voice_bar"] = fill
+        #
+        # Only when there is an allowance to run out of. A local voice buys
+        # nothing, and a bar pinned at empty forever would be read as a warning
+        # about something.
+        if self._cap() > 0:
+            track = tk.Frame(panel, bg=LINE, height=4)
+            track.pack(fill="x", padx=10, pady=(2, 2))
+            track.pack_propagate(False)
+            fill = tk.Frame(track, bg=COOL, height=4)
+            fill.place(x=0, y=0, relwidth=0.0, relheight=1.0)
+            self._fields["voice_bar"] = fill
 
         self._fields["voice_note"] = tk.Label(
             panel, text="", font=("Segoe UI", 8), bg=PANEL, fg=MUTED,
@@ -297,6 +305,13 @@ class Dashboard:
             return list(self.voices.list())
         except Exception:
             return []
+
+    def _cap(self) -> int:
+        """How much this voice is allowed to spend a month. 0 means it is free."""
+        try:
+            return int(self.voices.budget()[1])
+        except Exception:
+            return 0
 
     def _current_label(self, names: list[str]) -> str:
         try:
@@ -364,9 +379,17 @@ class Dashboard:
 
     def _apply(self, data: dict) -> None:
         paused = bool(data.get("paused"))
+        # Three states, not two. Asleep is the resting one and keeps the warm
+        # star; awake means the follow-up window is open and plain speech is
+        # being acted on, which is the one worth noticing from across the room.
+        if paused:
+            label, colour = "paused", MUTED
+        elif data.get("awake"):
+            label, colour = "awake", COOL
+        else:
+            label, colour = "asleep", STAR
         state = self._fields["state"]
-        state.config(text="paused" if paused else "listening",
-                     fg=MUTED if paused else STAR)
+        state.config(text=label, fg=colour)
         self._fields["pause"].config(text="Resume" if paused else "Pause")
 
         seconds = int(data.get("uptime_s") or 0)
@@ -409,32 +432,82 @@ class Dashboard:
     # --- voice --------------------------------------------------------------
 
     def _selected_voice(self):
-        """Which voice the dropdown is showing. Runs on the Tk thread."""
-        variable = self._fields.get("voice_var")
-        if variable is None:
+        """Which row is selected. Runs on the Tk thread.
+
+        Reads the Listbox, which is the widget that has held the selection
+        since the OptionMenu was removed. This went on reading a `voice_var`
+        StringVar that the same change deleted, so it returned None every time:
+        clicking a voice did nothing, Preview did nothing, and the picker was
+        dead in the only build that ever showed it.
+
+        By index, because that is what the widget reports and nothing promises
+        two rows cannot read alike.
+        """
+        listbox = self._fields.get("voice_list")
+        if listbox is None:
             return None
         try:
-            label = variable.get()
+            selection = listbox.curselection()
         except Exception:
             return None
-        for voice in self._available():
-            if voice.label == label:
-                return voice
-        return None
+        if not selection:
+            return None
+        voices = self._available()
+        index = int(selection[0])
+        return voices[index] if 0 <= index < len(voices) else None
 
     def _pick(self) -> None:
-        """Switch voice. Called from the dropdown, so on the Tk thread."""
+        """Switch voice. Called from the list, so on the Tk thread.
+
+        Dispatched for the same reason a preview is: switching to a local voice
+        loads an ONNX model and hands it to the Speaker, which is roughly a
+        second of work, and a window that stops redrawing for a second on every
+        click reads as broken.
+        """
         voice = self._selected_voice()
-        if voice is None:
+        if voice is None or self._voice_busy.is_set():
+            return
+        if self._is_current(voice):
+            # Clicking the row that is already highlighted still lands here.
+            # Tk's mouse binding fires <<ListboxSelect>> whether or not the
+            # selection changed: tk8.6 listbox.tcl, ListboxBeginSelect ends in
+            # FireListboxSelectEvent unconditionally. Without this, that click
+            # would rebuild the voice already speaking and hand it to the
+            # Speaker, which barges in, so Vesper would stop mid-sentence and
+            # nothing on screen would say why.
+            #
+            # A selection set in code does not fire it, measured on tk 8.6.15,
+            # so the row this window highlights when it opens is not the
+            # problem. The click on it is.
             return
         if not getattr(voice, "free", True):
             self._voice_note = f"{voice.name} needs a paid ElevenLabs plan"
             return
+
+        self._voice_busy.set()
+        self._voice_note = f"switching to {voice.name}..."
+        threading.Thread(
+            target=self._pick_worker, args=(voice,), daemon=True,
+            name="voice-pick",
+        ).start()
+
+    def _is_current(self, voice) -> bool:
+        """Is this already the voice speaking? Asked of the panel, not cached,
+        because it is the only side that can still be right after a switch."""
+        try:
+            current = self.voices.current()
+        except Exception:
+            return False
+        return bool(current) and str(voice.label).startswith(current)
+
+    def _pick_worker(self, voice) -> None:
         try:
             self.voices.choose(voice.voice_id)
             self._voice_note = f"{voice.name} it is"
         except Exception as exc:
             self._voice_note = f"could not switch: {type(exc).__name__}"
+        finally:
+            self._voice_busy.clear()
 
     def _preview(self) -> None:
         """Speak a sample line. Dispatched to a worker, never run here.
@@ -482,13 +555,13 @@ class Dashboard:
         note = self._fields.get("voice_note")
         if note is None:
             return
-        try:
-            used, cap = self.voices.budget()
-        except Exception:
-            used, cap = 0, 0
 
         bar = self._fields.get("voice_bar")
         if bar is not None:
+            try:
+                used, cap = self.voices.budget()
+            except Exception:
+                used, cap = 0, 0
             share = 0.0 if cap <= 0 else min(1.0, max(0.0, used / cap))
             try:
                 bar.place_configure(relwidth=share)
@@ -496,14 +569,15 @@ class Dashboard:
             except Exception:
                 pass
 
+        # The steady line belongs to the panel: only it knows whether the thing
+        # worth saying is an allowance, or that nothing is leaving the machine.
         if self._voice_note:
             text = self._voice_note
-        elif cap <= 0:
-            text = "no allowance set; speaking locally"
-        elif used >= cap:
-            text = "monthly allowance spent, speaking locally until next month"
         else:
-            text = f"{cap - used:,} of {cap:,} characters left this month"
+            try:
+                text = self.voices.status()
+            except Exception:
+                text = ""
         try:
             note.config(text=text)
         except Exception:

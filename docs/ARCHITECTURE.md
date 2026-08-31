@@ -162,8 +162,27 @@ during a meeting is a far worse failure than missing one wake, which you recover
 from by saying the name again. The threshold and the list are both tested
 against a set of innocent sentences that must never trigger.
 
-After it answers, a 25 second follow-up window accepts plain speech, so a
-conversation does not require saying the name before every sentence.
+A 25 second window then accepts plain speech, so a conversation does not
+require saying the name before every sentence. Two details decide whether it
+feels right, and this document described neither for a while because the window
+was switched off in the shipped config and nobody was living with it.
+
+It is measured from **the room going quiet**, not from the end of the turn.
+`half_duplex` makes the microphone deaf while Vesper speaks, and `TurnComplete`
+fires before playback finishes, so a clock started when the answer was ready is
+spent on Vesper's own voice: a fifteen second reply left you seven seconds to
+respond in. It restarts when the speaker actually drains, noticed on the audio
+loop that is already running thirty times a second rather than on a timer. And
+every utterance the gate accepts pushes it out again, so it tracks the
+conversation rather than the last reply.
+
+The window decides whether Vesper **listens**, never whether he may **act**.
+`WakeResult.reason` is what separates the two: only `wake-word` may approve a
+change to the machine or end the process. A "yes" said to someone else in the
+room lands inside the window all the time, and "quit" is ordinary English.
+
+`WakeGate` holds one float and reads no clock at all. `now` is a parameter on
+every method, which is what makes the whole thing testable without sleeping.
 
 ---
 
@@ -396,11 +415,24 @@ speak(text, stop):
 
 Two reasons for that shape, and the second is the important one.
 
-`Speaker.voice` is read inside the worker thread. Swapping it to change voice
-mid-utterance would mean coordinating a handover and calling `close()` on a
-backend that is currently speaking. Here, changing voice assigns a string that
-`speak` reads once at the top, and the worst case is that a sentence already in
-flight finishes in the old voice, which is correct anyway.
+`Speaker.voice` is read inside the worker thread, so changing voice on a cloud
+backend costs nothing: `use()` assigns a string that `speak` reads once at the
+top, and the worst case is a sentence already in flight finishing in the old
+voice, which is correct anyway.
+
+A local backend cannot do that. It holds a loaded ONNX model and an open output
+stream, so switching means building a second one and handing it over, which is
+what `Speaker.use_voice` is for. The handover this originally avoided turned
+out to be three lines in a fixed order: barge in first, because Piper holds the
+whole utterance inside its own lock and `close()` would otherwise block the
+caller for the length of the sentence; swap under the Speaker's lock, so a
+`say()` landing at the same moment queues against one voice or the other rather
+than half of each; close the old one last, because two output streams fighting
+over the device is a real symptom rather than a tidiness point.
+
+Avoiding it for as long as we did had a cost. The dashboard only got a voice
+picker when the cloud voice was running, and the default install is Piper, so
+the setting was not there at all.
 
 More importantly, the local commands must survive an outage. Mute, undo and
 shutdown are handled without touching Claude precisely so they work with the

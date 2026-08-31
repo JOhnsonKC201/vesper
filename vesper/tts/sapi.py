@@ -24,7 +24,10 @@ class SapiTTS:
 
     def __init__(self, *, voice_hint: str = "", rate: int = 1, volume: int = 100) -> None:
         self.name = "sapi"
-        self._voice_hint = voice_hint
+        # Public, and updated to the full description once a voice is picked,
+        # because the dashboard has to be able to ask "which one is this?" and
+        # the hint it was built with may be a fragment or empty.
+        self.voice_hint = voice_hint
         self._rate = max(-10, min(10, rate))
         self._volume = max(0, min(100, volume))
         self._voice = None
@@ -49,11 +52,18 @@ class SapiTTS:
         voice.Rate = self._rate
         voice.Volume = self._volume
 
-        if self._voice_hint:
+        if self.voice_hint:
             for token in voice.GetVoices():
-                if self._voice_hint.lower() in token.GetDescription().lower():
+                if self.voice_hint.lower() in token.GetDescription().lower():
                     voice.Voice = token
                     break
+
+        # Whatever it settled on, including the system default when no hint was
+        # given. Assigning a str is atomic, and the dashboard only reads it.
+        try:
+            self.voice_hint = voice.Voice.GetDescription()
+        except Exception:
+            pass
 
         self._voice = voice
         self._thread_id = current

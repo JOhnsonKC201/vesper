@@ -91,6 +91,35 @@ class Speaker:
         self._stop.set()
         return dropped
 
+    def use_voice(self, voice) -> None:
+        """Swap the speech backend on a running assistant.
+
+        Changing voice used to mean editing `config.yaml` and restarting, which
+        is why the dashboard could not offer it for the local backends. It is
+        three steps and none of them are optional:
+
+        Cut off whatever is in flight first. Piper holds the utterance's whole
+        duration inside its own lock, so closing the old backend while it is
+        mid-sentence would block this thread for seconds.
+
+        Swap under the lock, so a `say()` landing at the same moment queues
+        against one voice or the other rather than half of each.
+
+        Close the old one last. Piper keeps an output stream open, and two of
+        them fighting over the device is a real symptom, not a tidiness point.
+        """
+        if voice is None or voice is self.voice:
+            return
+        self.barge_in()
+        with self._lock:
+            previous, self.voice = self.voice, voice
+        try:
+            previous.close()
+        except Exception:
+            # A backend that will not shut down cleanly must not stop the new
+            # one from being used. The worst case is a leaked stream.
+            pass
+
     def wait_until_idle(self, timeout: float | None = None) -> bool:
         """Block until the queue drains. Returns False on timeout."""
         return self._idle.wait(timeout)

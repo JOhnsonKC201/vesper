@@ -32,12 +32,27 @@ run.bat --devices                list microphones
 run.bat --enroll                 teach it your voice, once
 run.bat --install-autostart      start with Windows, hidden
 run.bat --uninstall-autostart    stop doing that
+run.bat --desktop-icon           put a launcher on the desktop
+run.bat --remove-desktop-icon    take it off again
 ```
 
-Say **"Vesper"** (or "Jarvis") every time. Nothing you say is acted on unless
-you name him first, which also means answering a permission question is
-"Vesper, yes" rather than a bare "yes". Set `listening.follow_up_window_s` back
-to 25 if you would rather keep talking without repeating the name.
+Say **"Vesper"** (or "Jarvis") to wake him. He stays awake for 25 seconds, and
+every thing you say pushes that back out, so a real back and forth does not
+mean repeating the name before every sentence. He also stays awake for 25
+seconds after he finishes answering, measured from when his own voice stops
+rather than from when the answer was ready, because the microphone is deaf
+while he talks. Then he goes back to sleep and needs the name again.
+
+Two things always cost you his name, awake or not: **approving a change to your
+machine**, and **ending him**. A bare "yes" inside the window approves nothing,
+because a yes said to someone else in the room lands inside that window all the
+time, and "quit" and "exit" are ordinary English. Both get "I'll need my name on
+that one" and the question stays open for a proper answer. Saying no needs no
+name: stopping something should never be the harder half. A question you never
+answer expires when he goes back to sleep, rather than standing open waiting for
+a stray yes. Say **"go to sleep"** to put him back early, and set
+`listening.follow_up_window_s` to 0 if you would rather say his name every
+single time.
 
 Say **"be quiet"** to stop it speaking up on its own, and **"unmute"** to undo
 that. Say **"undo that"** to put back whatever it last changed. All three are
@@ -51,18 +66,39 @@ shortcut, or run `--uninstall-autostart`, and it stops. `run.bat --check`
 reports whether it is installed, so the self check can answer "will this come
 back after a reboot".
 
+`run.bat --desktop-icon` puts the other half on your desktop: the same silent
+launcher, wearing the same evening star the tray shows, so quitting Vesper for
+a call is not a decision you have to think about. Two details in it are not
+obvious. The icon goes where Windows actually draws the desktop, which with
+OneDrive's desktop backup turned on is `~/OneDrive/Desktop` and not `~/Desktop`,
+and the old folder is usually still there to be written to by mistake. And
+clicking it while Vesper is already running puts a message on screen rather
+than only printing one, because started this way there is no console for a
+printed line to land in, and a double click that does nothing at all is a
+double click you make twice.
+
 Once there is no console, three things that used to be free stop being free.
 
 **Seeing it.** The tray icon is the evening star, which is what Vesper means,
 drawn in code rather than shipped as an asset because Pillow is not installed
-and would be a new dependency to draw one 16 pixel mark. It is lit when
-listening and dimmed when paused, so a glance answers the question. Double click
+and would be a new dependency to draw one 16 pixel mark. It is a warm star
+asleep, a cool one while he is awake and acting on plain speech, and drained of
+colour when paused, so a glance answers the question. Double click
 it, or pick Dashboard from the menu, for a panel showing uptime, turns, session
 cost, what it last heard, and every change it has made to your machine.
 
-**Stopping it.** The tray menu has pause, open log and quit. Or say "shut
-down", "go to sleep" or "goodbye Vesper", all handled locally without a round
-trip to Claude, because you say them precisely when something has gone wrong.
+**Changing the voice.** The same panel lists every voice this machine can
+speak in and switches between them while it is running. Each Piper model
+appears once per character, since the character is half the sound, and every
+voice Windows has is there too. Preview speaks a sample line in the one you are
+pointing at before you commit to it, and the pick outlasts a restart. With
+`voice.engine: elevenlabs` the list is the eighteen usable cloud voices
+instead, with the month's remaining allowance drawn underneath.
+
+**Stopping it.** The tray menu has pause, open log and quit. Or say "Vesper,
+shut down" or "Vesper, goodbye", handled locally without a round trip to
+Claude, because you say them precisely when something has gone wrong. Not "go
+to sleep", which used to end it and now means what it says.
 `taskkill` works too, now that SIGTERM and SIGBREAK are handled.
 
 All three reach the same exit, which matters more than it sounds. Before this,
@@ -306,8 +342,13 @@ python scripts/voice_ab.py
 ```
 
 That writes `natural.wav`, `jarvis.wav` and `broadcast.wav` into `var/voice-ab/`
-with the same three lines in each. Set `voice.character` to whichever wins.
-`natural` is exactly what it sounded like before any of this.
+with the same three lines in each. `natural` is exactly what it sounded like
+before any of this.
+
+Or skip the wav files: the dashboard lists the model at each of the three
+characters, and Preview plays them one click apart. Either way the winner is
+remembered in `var/voice-choice.json`, which beats `voice.character` in the
+config file.
 
 ---
 
@@ -552,14 +593,16 @@ commented. The ones worth knowing:
 | `listening.end_silence_ms` | The most-felt number here. 700ms is snappy. Raise it if it cuts you off while you think. |
 | `listening.half_duplex` | On by default. False only if you wear headphones, which gives back the ability to talk over it. |
 | `listening.whisper_model` | `base.en` for speed, `small.en` or `large-v3-turbo` for proper nouns. |
+| `listening.follow_up_window_s` | How long he stays awake after anyone speaks. 0 requires his name on every single utterance. Approving a change and ending him take the name either way. |
 | `identity.personality` | Free text appended to the persona. The dial for how it feels. |
 | `voice.speed` | Piper's natural pace reads slightly slow for conversation. |
+| `voice.choice` | Where the dashboard writes the voice you picked. It beats `model`, `character` and `eleven.voice_id`; delete the file to go back to the config. |
 | `voice.character` | `jarvis`, `broadcast`, or `natural` for Piper untouched. Compare with `python scripts/voice_ab.py`. |
 | `proactive.enabled` | Turn off the ambient loop entirely. |
 | `brain.add_dirs` | What it may read. `C:\` means the whole drive. |
 | `brain.allowed_tools` | What it may do without asking. Every entry must be incapable of changing anything: no bare `Bash`, no interpreter. |
 | `brain.permission_mode` | `manual` is what makes the gate exist. `auto` is the CLI default and writes under the working directory with no announcement. |
-| `consent.window_s` | How long a spoken yes still refers to what was asked. |
+| `consent.window_s` | The backstop on how long a spoken yes still refers to what was asked. In voice mode the awake window is shorter and closes first; this is what governs typed input, which has no microphone loop to notice. |
 | `consent.undo_dir` | Where copies of changed files are kept. Blank makes every approved change permanent. |
 
 ---

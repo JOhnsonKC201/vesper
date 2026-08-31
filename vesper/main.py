@@ -8,6 +8,7 @@ Modes:
     python -m vesper.main --check     verify every dependency, then exit
     python -m vesper.main --enroll    teach it your voice
     python -m vesper.main --install-autostart    start with Windows
+    python -m vesper.main --desktop-icon         put a launcher on the desktop
     python -m vesper.main --check --offline   skip the paid gate check
 """
 
@@ -21,6 +22,7 @@ from pathlib import Path
 
 from . import autostart as autostart_module
 from . import config as config_module
+from . import desktop as desktop_module
 from . import single
 from .audio.mic import Microphone
 from .audio.speaker import Speaker
@@ -43,18 +45,33 @@ from .wake import WakeConfig, WakeGate
 # --- assembly ---------------------------------------------------------------
 
 
-def build_local_voice(cfg: config_module.Config, ui: TerminalUI, *, engine: str):
+def build_local_voice(cfg: config_module.Config, ui: TerminalUI, *,
+                      engine: str, chosen=None):
     """The voice that works with the network unplugged.
 
     Split out from `build_voice` because the cloud backend does not replace
     this, it sits on top of it. `conversation.py` handles "Quiet from now on."
     and "Shutting down." locally so they survive an outage, and that promise
     only holds if there is always a local voice underneath.
+
+    `chosen` is what was picked in the dashboard, and it wins over config.yaml
+    for the same reason it does for the cloud voice: a click is more recent and
+    more deliberate than a file edited last month. A local id carries both the
+    model and the delivery, so restoring one restores how it sounded, not just
+    which voice it was.
     """
-    if engine in ("piper", "elevenlabs"):
+    picked_engine, picked_id = "", ""
+    if chosen is not None and chosen.local:
+        picked_engine, picked_id = chosen.engine, chosen.voice_id
+
+    want = picked_engine or ("piper" if engine in ("piper", "elevenlabs") else engine)
+
+    if want == "piper":
+        from .tts import catalog
         from .tts.piper_voice import PiperTTS
 
-        model = PiperTTS.find_voice(cfg.voices_path(), cfg.voice.model)
+        stem, character = catalog.split_piper_id(picked_id)
+        model = PiperTTS.find_voice(cfg.voices_path(), stem or cfg.voice.model)
         if model is None:
             ui.warn(
                 f"no piper voice in {cfg.voices_path()}. "
@@ -67,7 +84,9 @@ def build_local_voice(cfg: config_module.Config, ui: TerminalUI, *, engine: str)
                     model,
                     speed=cfg.voice.speed,
                     volume=cfg.voice.volume,
-                    character=shaping.preset(cfg.voice.character),
+                    character=shaping.preset(
+                        character if picked_id else cfg.voice.character
+                    ),
                 )
                 return voice, f"{voice.name} (piper, {voice.character.name})"
             except Exception as exc:
@@ -75,8 +94,14 @@ def build_local_voice(cfg: config_module.Config, ui: TerminalUI, *, engine: str)
 
     from .tts.sapi import SapiTTS
 
+    hint = picked_id if picked_engine == "sapi" else cfg.voice.sapi_voice_hint
     if SapiTTS.available():
-        return SapiTTS(voice_hint=cfg.voice.sapi_voice_hint), "windows sapi"
+        return SapiTTS(voice_hint=hint), "windows sapi"
+
+    # A remembered SAPI voice on a machine with no SAPI. Falling back to Piper
+    # beats going silent over a click made months ago on another machine.
+    if picked_engine and want != "piper":
+        return build_local_voice(cfg, ui, engine="piper")
 
     ui.warn("no speech backend available; Vesper will be silent")
     return NullVoice(), "silent"
@@ -89,7 +114,13 @@ def build_voice(cfg: config_module.Config, ui: TerminalUI):
     if engine == "none":
         return NullVoice(), "silent"
 
-    local, label = build_local_voice(cfg, ui, engine=engine)
+    from . import voicechoice
+
+    # Read once and given to both halves: the same file records a local pick
+    # and a cloud one, and which it is decides who honours it.
+    chosen = voicechoice.load(cfg.voice_choice_path())
+
+    local, label = build_local_voice(cfg, ui, engine=engine, chosen=chosen)
     if engine != "elevenlabs":
         return local, label
 
@@ -100,18 +131,19 @@ def build_voice(cfg: config_module.Config, ui: TerminalUI):
         ui.warn(f"voice.engine is elevenlabs but no API key is set; using {label}")
         return local, label
 
-    from . import voicechoice
     from .tts import eleven
 
     # A voice picked in the dashboard beats the one written in config.yaml,
-    # because clicking it is both more recent and more deliberate.
-    chosen = voicechoice.load(cfg.voice_choice_path())
+    # because clicking it is both more recent and more deliberate. Only when
+    # it is an ElevenLabs voice: a remembered Piper model is an id this API
+    # would reject, and it has already been honoured by the local half above.
+    cloud_id = "" if chosen.local else chosen.voice_id
     settings = cfg.voice.eleven
     try:
         cloud = eleven.build(
             local,
             api_key=key,
-            voice_id=chosen.voice_id or settings.voice_id,
+            voice_id=cloud_id or settings.voice_id,
             model_id=settings.model_id,
             cache_dir=cfg.voice_cache_path(),
             budget_path=cfg.voice_budget_path(),
@@ -228,7 +260,10 @@ def build(cfg: config_module.Config, *, with_mic: bool = True):
     # rather than queueing whenever a real conversation is in progress.
     conversation.proactive = ProactiveLoop(
         brain=brain,
-        speak=conversation._say,
+        # `volunteer`, not `_say`: a remark he started opens the follow-up
+        # window, so "your battery is at nine percent" can be answered with
+        # "plug it in" rather than with "Vesper, plug it in".
+        speak=conversation.volunteer,
         config=ProactiveConfig(
             enabled=cfg.proactive.enabled,
             check_interval_s=cfg.proactive.check_interval_s,
@@ -261,20 +296,41 @@ def _start_tray(cfg: config_module.Config, conversation, ui):
         if path is not None and path.exists():
             os.startfile(str(path))  # noqa: S606 - opening our own log
 
-    # Only when the cloud voice is actually running. With Piper the picker
-    # would be a control with one entry and nothing to say, so it is left out
-    # of the window entirely rather than shown greyed.
-    #
     # `conversation.speaker`, not `speaker`. This function receives only cfg,
     # conversation and ui: the bare name was a local of `build()`, a different
     # function, so this raised NameError on every launch with the tray on,
     # which is the default. No test called _start_tray, so it went unnoticed.
     voice = conversation.speaker.voice
+
+    # Whichever backend is running gets a picker. This used to be the cloud
+    # one or nothing, on the grounds that a local picker would have one entry
+    # and nothing to say, and that left the default install with no way to
+    # change voice short of editing config.yaml and restarting. It is also
+    # untrue: three deliveries per Piper model, plus every voice Windows has.
     panel = None
     if hasattr(voice, "say_as"):
         from .ui.voicepanel import VoicePanel
 
         panel = VoicePanel(voice, choice_path=cfg.voice_choice_path(), log=ui.info)
+    elif isinstance(voice, NullVoice):
+        # `engine: none` is a deliberate vow of silence, and a picker here
+        # would be an offer to break it. Not a setting anyone went looking for.
+        panel = None
+    else:
+        from .ui.voicepanel import LocalVoicePanel
+
+        panel = LocalVoicePanel(
+            conversation.speaker,
+            voices_dir=cfg.voices_path(),
+            speed=cfg.voice.speed,
+            volume=cfg.voice.volume,
+            choice_path=cfg.voice_choice_path(),
+            log=ui.info,
+        )
+        # Neither a Piper model nor SAPI: nothing to pick between, and a
+        # picker with no rows is the dead control the old comment feared.
+        if not panel.list():
+            panel = None
 
     dashboard = Dashboard(
         conversation.status,
@@ -295,6 +351,10 @@ def _start_tray(cfg: config_module.Config, conversation, ui):
         log=getattr(conversation, "log", None),
     )
     conversation.dashboard = dashboard
+    # So the audio loop can push awake and asleep to the icon the moment either
+    # happens. Set before `start()`, because the first block can arrive while
+    # the tray thread is still coming up.
+    conversation.tray = tray
     if not tray.start():
         ui.warn("no tray icon; stop it with ctrl-c or by saying 'shut down'")
         return None
@@ -329,13 +389,62 @@ def _handle_signals(conversation, ui) -> None:
 # --- modes ------------------------------------------------------------------
 
 
+def console_is_visible() -> bool:
+    """Can a printed line actually be read by anyone?
+
+    Started from the desktop icon it cannot. The launcher is wscript running
+    `cmd /c run.bat` with the window hidden, so there is a console attached and
+    it has never been on screen. `isatty()` says yes and is wrong, which is why
+    this asks the window manager instead.
+
+    When it cannot tell, it says yes and the caller stays quiet: an unexpected
+    dialog box is worse than a message nobody needed.
+    """
+    try:
+        import ctypes
+
+        window = ctypes.windll.kernel32.GetConsoleWindow()
+        return bool(window) and bool(ctypes.windll.user32.IsWindowVisible(window))
+    except Exception:
+        return True
+
+
+def say_on_screen(*lines: str, title: str = "Vesper") -> bool:
+    """Put a message where someone with no console will see it.
+
+    Returns whether it was shown, which is only interesting to the tests.
+    """
+    if console_is_visible():
+        return False
+    try:
+        import ctypes
+
+        # OK, information icon, topmost: without topmost it can open behind
+        # whatever is full screen, which makes the double click look ignored
+        # all over again.
+        ctypes.windll.user32.MessageBoxW(
+            0, os.linesep.join(lines), title, 0x40 | 0x40000
+        )
+        return True
+    except Exception:
+        return False
+
+
 def run_voice(cfg: config_module.Config) -> int:
     if not single.claim():
         # Two copies both hold the microphone, so every utterance is answered
         # and spoken twice, over each other, and both spend your subscription
         # window. With autostart on, a second copy is the expected accident
         # rather than an unusual one.
-        print("Vesper is already running. Use its tray icon to quit it first.")
+        #
+        # Said twice on purpose. Started from a terminal the print is enough;
+        # started from the desktop icon there is no window to print into, and
+        # the double click would otherwise do nothing at all, visibly.
+        headline = "Vesper is already running."
+        detail = ("Its icon is in the tray, by the clock. Right click it "
+                  "for the dashboard, or to quit.")
+        print(headline, detail)
+        say_on_screen(headline, "", detail)
         return 1
 
     conversation, ui, voice_label = build(cfg)
@@ -472,6 +581,7 @@ def check(cfg: config_module.Config, *, gate: bool = True) -> int:
     # Not a pass or fail, just the answer to "will it come back after a
     # reboot", which is the whole question once it runs from login.
     print(f"  --    autostart  {autostart_module.describe()}")
+    print(f"  --    desktop icon  {desktop_module.describe()}")
     from .stt.voiceprint import available as voice_model_ready
 
     print(f"  --    voice model  "
@@ -533,6 +643,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="teach it your voice, so it ignores everyone else")
     parser.add_argument("--install-autostart", action="store_true",
                         help="start with Windows, hidden")
+    parser.add_argument("--desktop-icon", action="store_true",
+                        help="put a launcher icon on the desktop")
+    parser.add_argument("--remove-desktop-icon", action="store_true",
+                        help="take that icon off the desktop again")
     parser.add_argument("--uninstall-autostart", action="store_true",
                         help="stop starting with Windows")
     parser.add_argument("--check", action="store_true", help="verify dependencies")
@@ -555,6 +669,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.install_autostart:
         ok, detail = autostart_module.install(config_module.ROOT)
         print(f"autostart installed: {detail}" if ok else f"could not install: {detail}")
+        return 0 if ok else 1
+    if args.desktop_icon:
+        ok, detail = desktop_module.install(config_module.ROOT)
+        print(f"desktop icon created: {detail}" if ok
+              else f"could not create it: {detail}")
+        return 0 if ok else 1
+    if args.remove_desktop_icon:
+        ok, detail = desktop_module.uninstall()
+        print(f"desktop icon removed: {detail}" if ok
+              else f"could not remove it: {detail}")
         return 0 if ok else 1
     if args.uninstall_autostart:
         ok, detail = autostart_module.uninstall()

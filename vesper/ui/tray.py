@@ -35,10 +35,20 @@ class TrayState:
     """What the icon should currently say."""
 
     listening: bool = True
+    # Awake means the follow-up window is open and plain speech counts as
+    # talking to him. Asleep, which is the resting state, means he is waiting
+    # to hear his name. Both are "listening": the difference is what he will
+    # act on, and that is worth being able to see from across the room.
+    awake: bool = False
     detail: str = ""
 
     def tooltip(self, name: str = "Vesper") -> str:
-        head = f"{name}: listening" if self.listening else f"{name}: paused"
+        if not self.listening:
+            head = f"{name}: paused"
+        elif self.awake:
+            head = f"{name}: awake, say anything"
+        else:
+            head = f"{name}: asleep, say his name"
         # Windows truncates tooltips at 128 characters and silently fails on
         # some builds if the string is longer.
         return (f"{head}\n{self.detail}" if self.detail else head)[:127]
@@ -104,10 +114,19 @@ class TrayIcon:
         except Exception:
             pass
 
-    def update(self, *, listening: bool | None = None, detail: str | None = None) -> None:
-        """Change what the tooltip and icon show."""
+    def update(self, *, listening: bool | None = None, awake: bool | None = None,
+               detail: str | None = None) -> None:
+        """Change what the tooltip and icon show.
+
+        Called from whichever thread noticed the change, which is the audio
+        loop for `awake` and the tray's own pump for `listening`. That is safe:
+        the work is a `Shell_NotifyIcon` call, which talks to the shell rather
+        than to this window's message queue.
+        """
         if listening is not None:
             self.state.listening = listening
+        if awake is not None:
+            self.state.awake = awake
         if detail is not None:
             self.state.detail = detail
         self._refresh()
@@ -152,6 +171,19 @@ class TrayIcon:
         except Exception:
             pass
 
+    def icon_state(self) -> str:
+        """Which drawn icon the current state calls for.
+
+        Its own method so it can be tested. Inside `_icon_handle` it sat
+        between two win32 imports and a `LoadImage`, where nothing could reach
+        it without a message pump and a desktop.
+        """
+        if not self.state.listening:
+            return "paused"
+        # The cool star for awake. It has been drawn into var/icons since the
+        # icon set was written, and loaded by nothing until now.
+        return "working" if self.state.awake else "listening"
+
     def _icon_handle(self):
         """The drawn icon for the current state, or a stock one if it is missing.
 
@@ -162,7 +194,7 @@ class TrayIcon:
         import win32con
         import win32gui
 
-        path = self._icons.get("listening" if self.state.listening else "paused")
+        path = self._icons.get(self.icon_state())
         if path is not None:
             try:
                 handle = win32gui.LoadImage(

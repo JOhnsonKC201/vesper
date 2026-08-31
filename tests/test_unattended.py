@@ -116,7 +116,7 @@ def test_shutdown_can_be_asked_for_from_another_thread():
 
 
 @pytest.mark.parametrize(
-    "said", ["shut down", "go to sleep", "goodbye Vesper", "turn yourself off"]
+    "said", ["shut down", "goodbye Vesper", "turn yourself off", "quit"]
 )
 def test_a_spoken_goodbye_ends_it_without_asking_claude(said):
     """With no console there is no ctrl-c, so this is the only way out that
@@ -131,6 +131,26 @@ def test_a_spoken_goodbye_ends_it_without_asking_claude(said):
 
     assert not conversation.running
     assert brain.asked == [], "a shutdown request went to Claude"
+
+
+def test_go_to_sleep_puts_him_to_sleep_rather_than_ending_him():
+    """It used to be a way of saying "shut down", which was reasonable when
+    there was no such thing as being asleep. Now that he spends most of his
+    time asleep and you can watch him do it, the phrase has to mean the state.
+
+    Mutation that fails this: put "go to sleep" back in _SHUTDOWN_PHRASES.
+    """
+    import time as _time
+
+    conversation, speaker, _ = _conversation()
+    conversation._running.set()
+    conversation.wake.engage(_time.monotonic())
+
+    conversation.hear("go to sleep")
+    speaker.close()
+
+    assert conversation.running, "it ended the process instead of sleeping"
+    assert not conversation.wake.engaged(_time.monotonic())
 
 
 def test_pausing_stops_acting_on_audio_without_closing_the_microphone():
@@ -176,6 +196,134 @@ def test_the_shortcut_lands_in_the_startup_folder(monkeypatch, tmp_path):
     expected = (tmp_path / "Microsoft" / "Windows" / "Start Menu" / "Programs"
                 / "Startup" / "Vesper.lnk")
     assert autostart.shortcut_path() == expected
+
+
+# --- an icon on the desktop -------------------------------------------------
+
+
+def test_the_icon_goes_where_windows_actually_draws_the_desktop(monkeypatch, tmp_path):
+    """Not `~/Desktop`. With OneDrive backing the desktop up, which is the
+    default on a new install and is the case here, the real one is
+    `~/OneDrive/Desktop` while the old folder sits there full of leftovers.
+    Writing to it would put the icon somewhere the person who asked for it
+    never looks, and nothing anywhere would report a failure.
+
+    Mutation that fails this: return `Path.home() / "Desktop"` unconditionally.
+    """
+    from vesper import desktop
+
+    redirected = tmp_path / "OneDrive" / "Desktop"
+    monkeypatch.setattr(desktop, "shell_folder", lambda name: str(redirected))
+
+    assert desktop.desktop_dir() == redirected
+    assert desktop.shortcut_path() == redirected / "Vesper.lnk"
+
+
+def test_a_machine_that_cannot_be_asked_still_gets_a_guess(monkeypatch):
+    from vesper import desktop
+
+    monkeypatch.setattr(desktop, "shell_folder", lambda name: "")
+    assert desktop.desktop_dir() == Path.home() / "Desktop"
+
+
+def test_the_desktop_icon_refuses_to_point_at_a_launcher_that_is_missing(
+        monkeypatch, tmp_path):
+    from vesper import desktop
+
+    monkeypatch.setattr(desktop, "desktop_dir", lambda: tmp_path)
+    ok, detail = desktop.install(tmp_path / "empty")
+
+    assert not ok and "run_silent.vbs" in detail
+    assert not (tmp_path / "Vesper.lnk").exists()
+
+
+def test_removing_a_desktop_icon_that_was_never_there_is_not_an_error(
+        monkeypatch, tmp_path):
+    from vesper import desktop
+
+    monkeypatch.setattr(desktop, "desktop_dir", lambda: tmp_path)
+    ok, detail = desktop.uninstall()
+
+    assert ok and "not installed" in detail
+    assert "not installed" in desktop.describe()
+
+
+def test_the_icon_is_vespers_own_and_starts_it_without_a_console(
+        monkeypatch, tmp_path):
+    """The shortcut already on this desktop ran `run.bat` directly, so it left
+    a console window open for the whole session, and it wore SndVol.exe's icon,
+    the Windows volume mixer. Neither of those says "Vesper" to someone looking
+    at a desktop full of shortcuts.
+
+    Mutation that fails this: drop `icon=` from `desktop.install`, or point the
+    shortcut at run.bat.
+    """
+    pytest.importorskip("win32com.client")
+    from vesper import config as config_module
+    from vesper import desktop
+
+    monkeypatch.setattr(desktop, "desktop_dir", lambda: tmp_path)
+    ok, detail = desktop.install(config_module.ROOT)
+    assert ok, detail
+
+    import win32com.client
+
+    link = win32com.client.Dispatch("WScript.Shell").CreateShortcut(
+        str(tmp_path / "Vesper.lnk"))
+
+    assert link.TargetPath.lower().endswith("wscript.exe")
+    assert "run_silent.vbs" in link.Arguments
+    assert "vesper-desktop.ico" in link.IconLocation
+    assert desktop.is_installed()
+
+
+# --- and a click that lands on a Vesper already running ---------------------
+
+
+def test_a_second_copy_says_so_where_it_can_actually_be_seen(monkeypatch):
+    """Started from the desktop icon there is no console, so the printed line
+    goes nowhere and the double click looks ignored. Which is exactly when
+    someone clicks it again.
+
+    Mutation that fails this: drop the `say_on_screen` call from `run_voice`.
+    """
+    from vesper import config as config_module
+    from vesper import main as main_module
+    from vesper import single
+
+    shown = []
+    monkeypatch.setattr(single, "claim", lambda *a, **k: False)
+    monkeypatch.setattr(main_module, "say_on_screen",
+                        lambda *lines, **kw: shown.append(lines) or True)
+
+    assert main_module.run_voice(config_module.Config()) == 1
+    assert shown and "already running" in shown[0][0]
+
+
+def test_a_terminal_gets_the_printed_line_and_no_dialog(monkeypatch):
+    """A dialog nobody asked for, in front of a console that just said the same
+    thing, is worse than saying nothing."""
+    from vesper import main as main_module
+
+    monkeypatch.setattr(main_module, "console_is_visible", lambda: True)
+    assert main_module.say_on_screen("hello") is False
+
+
+def test_the_dialog_cannot_open_behind_a_full_screen_window(monkeypatch):
+    import ctypes
+
+    from vesper import main as main_module
+
+    calls = []
+    monkeypatch.setattr(main_module, "console_is_visible", lambda: False)
+    monkeypatch.setattr(ctypes.windll.user32, "MessageBoxW",
+                        lambda *args: calls.append(args) or 1)
+
+    assert main_module.say_on_screen("one", "", "two") is True
+    _, text, title, flags = calls[0]
+    assert "one" in text and "two" in text
+    assert title == "Vesper"
+    assert flags & 0x40000, "not topmost, so it can open behind what is there"
 
 
 # --- only your voice --------------------------------------------------------
@@ -327,11 +475,19 @@ def test_voice_matching_is_fast_enough_to_be_invisible(tmp_path):
 # --- the tray, minus the parts that need a message pump ---------------------
 
 
-def test_the_tooltip_says_which_state_it_is_in():
+def test_the_tooltip_says_which_of_the_three_states_it_is_in():
+    """Asleep and awake are both "listening", and the difference between them
+    is what he will act on, which is the thing worth reading off a tooltip."""
     from vesper.ui.tray import TrayState
 
     state = TrayState(listening=True, detail="say the wake word")
-    assert "listening" in state.tooltip()
+    assert "asleep" in state.tooltip()
+
+    state.awake = True
+    assert "awake" in state.tooltip()
+
+    # Paused beats both. It is the only one of the three where the microphone
+    # is not being acted on at all.
     state.listening = False
     assert "paused" in state.tooltip()
 
