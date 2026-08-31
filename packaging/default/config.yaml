@@ -17,13 +17,57 @@ identity:
 
 brain:
   executable: claude
-  # sonnet is the right trade for conversation. opus is slower to first word,
-  # which is very noticeable when you are waiting for a voice to start.
-  model: sonnet
+  # opus thinks harder and costs your machine nothing, since that happens on
+  # Anthropic's side. It is roughly a second slower to the first word, which the
+  # holding phrases ("let me look") already cover. Drop to sonnet if you would
+  # rather have the second back.
+  model: opus
   # Blank means your home directory, which gives Claude reach across projects.
   cwd: ""
-  add_dirs: []
-  tools: [Bash, Read, Grep, Glob, WebSearch]
+  # Everything outside the working directory that Vesper may read. Reading is
+  # free and unannounced, so this is the honest statement of what it can see.
+  # Listing a drive root means the whole drive.
+  add_dirs: ["C:\\"]
+  # Write and Edit are here so it can act once you say yes. They do nothing
+  # until then: permission_mode refuses whatever allowed_tools omits.
+  tools: [Bash, Read, Write, Edit, Grep, Glob, WebSearch]
+  # manual is what makes any of this real. In the CLI default (auto) a file
+  # write under the working directory happens with no announcement at all.
+  permission_mode: manual
+  # Allowed without asking. Every entry must be incapable of changing anything.
+  # Nothing here may change anything or send anything off the machine.
+  # find, wmic, git branch, git remote, nvidia-smi and a powershell Get-*
+  # wildcard were all removed after a review: every one of them could act
+  # with no question asked. WebSearch went too, since it sends text out.
+  # Do not add bare Bash, or an interpreter: with Write refused Claude will
+  # reach for `python -c` or `printf > file` and the gate stops meaning
+  # anything. Anything missing here becomes a spoken question instead.
+  allowed_tools:
+    - Read
+    - Grep
+    - Glob
+    - "Bash(git status:*)"
+    - "Bash(git log:*)"
+    - "Bash(git diff:*)"
+    - "Bash(git show:*)"
+    - "Bash(ls:*)"
+    - "Bash(dir:*)"
+    - "Bash(cat:*)"
+    - "Bash(head:*)"
+    - "Bash(tail:*)"
+    - "Bash(type:*)"
+    - "Bash(findstr:*)"
+    - "Bash(where:*)"
+    - "Bash(which:*)"
+    - "Bash(wc:*)"
+    - "Bash(du:*)"
+    - "Bash(df:*)"
+    - "Bash(tasklist:*)"
+    - "Bash(systeminfo:*)"
+    - "Bash(date:*)"
+    - "Bash(whoami:*)"
+    - "Bash(hostname:*)"
+    - "Bash(ipconfig:*)"
   turn_timeout_s: 180
   # Resume the previous conversation on startup, so it remembers yesterday.
   # Bounded because a resumed session carries its whole history with it: past
@@ -42,28 +86,54 @@ voice:
   speed: 1.15
   volume: 0.9
   sapi_voice_hint: ""
+  # How the voice is finished. natural is Piper untouched; jarvis adds a
+  # composed delivery, a presence lift and a small room; broadcast is the
+  # same tone with no room, for headphones. Compare them with
+  # `python scripts/voice_ab.py`, which writes one wav per character.
+  character: jarvis
 
 listening:
   # null uses the system default input. Run `python -m vesper.main --devices`
   # to list microphones by index.
   device: null
-  # base.en is the latency choice: about 0.4s for a 2.5s clip on CPU. Use
-  # small.en or large-v3-turbo if you want accuracy on proper nouns and can
-  # accept the wait.
-  whisper_model: base.en
+  # small.en, because base.en could not reliably hear the wake word. Measured
+  # from a real session: of nine attempts at "hey Vesper, open new terminal",
+  # base.en produced "they have aspirin", "a vast for", "gave us for" and "best
+  # for", and only two of the nine woke it at all. Loosening the wake matcher to
+  # catch those would fire on ordinary English, so the model had to improve.
+  # Costs about 0.9s more per reply: 1.4s against 0.47s on a 2.7s clip.
+  # base.en is faster if it works for your voice; large-v3-turbo is better again
+  # and slower still.
+  whisper_model: small.en
   wake_required: true
   # After Vesper answers, plain speech counts as a reply for this long, so you
-  # are not saying its name before every sentence.
-  follow_up_window_s: 25
+  # are not saying its name before every sentence. Set to 0 to require the wake
+  # word on every single utterance, which is the strictest setting: nothing you
+  # say is ever acted on unless you named him first.
+  #
+  # It costs one thing worth knowing. Answering a permission question becomes
+  # "Vesper, yes" rather than a bare "yes", because a bare yes is no longer
+  # addressed to him. That is the trade for never being listened to by accident.
+  follow_up_window_s: 0
   # The most-felt number in the whole app. Lower feels snappier and cuts you
   # off mid-thought; higher feels patient and adds a dead beat to every turn.
   end_silence_ms: 700
   max_utterance_s: 30
-  # Set true if you use laptop speakers in a loud room. Vesper goes deaf while
-  # speaking, which loses barge-in but removes any chance of it hearing itself.
-  half_duplex: false
+  # True on laptop speakers, which is most machines. Vesper goes deaf while
+  # speaking and for a moment after, which loses barge-in and removes any
+  # chance of it hearing itself. On speakers, false means it cuts itself off
+  # mid-sentence on almost every reply, which is a far worse trade than
+  # losing the ability to talk over it. Set false if you wear headphones.
+  half_duplex: true
   barge_in_blocks: 3
   self_mute_ms: 250
+  # How long its own voice keeps arriving after the last block is written
+  # to the sound card. Raise it if it still hears itself.
+  tail_mute_ms: 350
+  # Cores transcription may use, out of your 8. Left unset CTranslate2
+  # takes every one of them for the half second after you stop speaking,
+  # which is the only moment this is noticeable. 0 means take everything.
+  cpu_threads: 4
 
 proactive:
   # Vesper speaks up unprompted about things worth knowing. It asks Claude
@@ -73,6 +143,40 @@ proactive:
   # Never more than one unprompted remark in this window.
   min_interval_s: 900
   quiet_hours: "23:30-08:00"
+
+consent:
+  # Ask out loud before anything that changes the machine, and act only on a
+  # spoken yes. Turning this off does not free Vesper to act, it leaves it
+  # unable to: the CLI still refuses, you just lose the way to approve.
+  enabled: true
+  # How long a "yes" still refers to what was asked. Long enough to think,
+  # short enough that a yes to something else cannot land on a stale request.
+  # Only speech addressed to Vesper can answer, so within listening.
+  # follow_up_window_s a bare "yes" works; after that it takes "Vesper, yes".
+  # That is deliberate: a "yes" said to someone else in the room must not
+  # approve a file write.
+  window_s: 45
+  # Every approval and refusal, one line each. Spoken consent leaves no record
+  # otherwise, and "what did it change" deserves an answer you can read.
+  log: var/actions.log
+  # Before an approved action runs, whatever it is about to change is
+  # copied here, so "undo that" can put it back. Covers the file tools
+  # and plain rm; a general shell command cannot be reversed and undo
+  # says so rather than pretending. Blank makes every change permanent.
+  undo_dir: var/undo
+
+runtime:
+  # A notification-area icon. Not decoration: started from your login there is
+  # no console, so this is the only way to pause or quit without Task Manager,
+  # which skips the exit path and orphans the claude child.
+  tray: true
+  # Where warnings and errors go when there is no terminal to print them to.
+  # Blank disables it, which makes a hidden failure invisible.
+  log: var/vesper.log
+  # Your enrolled voice, created by `run.bat --enroll`. Until it exists every
+  # voice is accepted, exactly as before. A clearly different voice is then
+  # ignored; an unsure one is still answered, and the score is logged.
+  voiceprint: var/voiceprint.json
 
 ui:
   greet_on_start: true

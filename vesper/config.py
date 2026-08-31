@@ -33,32 +33,67 @@ class Identity:
 @dataclass
 class BrainSettings:
     executable: str = "claude"
-    model: str = "sonnet"
+    model: str = "opus"
     # Where Claude's shell starts. Home gives it reach across your projects.
     cwd: str = ""
     add_dirs: tuple[str, ...] = ()
-    tools: tuple[str, ...] = ("Bash", "Read", "Grep", "Glob", "WebSearch")
-    # Pre-approved, read-only commands. Anything not listed prompts, which the
-    # protocol turns into a spoken request for permission.
+    # Write and Edit are present so Vesper *can* act once you say yes. They are
+    # not usable until then: permission_mode below refuses anything missing
+    # from allowed_tools.
+    tools: tuple[str, ...] = (
+        "Bash", "Read", "Write", "Edit", "Grep", "Glob", "WebSearch",
+    )
+    # Everything Vesper may do without asking. The rule for this list is that no
+    # entry may be able to change anything.
+    #
+    # A review of this list found six more entries that could change things,
+    # each of which meant an action nobody was ever asked about:
+    #   find      GNU findutils is on PATH here, so -delete and -exec run
+    #   wmic      `wmic process call create` starts arbitrary processes
+    #   git branch  -D deletes a branch
+    #   git remote  set-url rewrites .git/config
+    #   nvidia-smi  -pl, -pm and --gpu-reset change device state
+    #   powershell -Command Get-*  a wildcard on an interpreter's argument
+    # WebSearch came off too. It cannot touch the disk, but it sends text off
+    # the machine, and "what leaves this machine" is a promise this list keeps.
+    #
+    # `Bash(python*)` used to be here and had to come off: `python -c` writes
+    # files, deletes them and reaches the network, so allowing it quietly
+    # allowed all three. Any interpreter, package manager or editor belongs on
+    # the far side of the gate for the same reason. Bare `Bash` most of all:
+    # with Write refused, Claude will reach for `printf > file` instead, so a
+    # list containing bare Bash is not a gate at all.
     allowed_tools: tuple[str, ...] = (
-        "Bash(git status*)",
-        "Bash(git log*)",
-        "Bash(git diff*)",
-        "Bash(git branch*)",
-        "Bash(python*)",
-        "Bash(dir*)",
-        "Bash(ls*)",
-        "Bash(cat*)",
-        "Bash(type*)",
-        "Bash(powershell -NoProfile -Command Get-*)",
-        "Bash(tasklist*)",
-        "Bash(systeminfo*)",
-        "Bash(where*)",
-        "Bash(findstr*)",
         "Read",
         "Grep",
         "Glob",
+        "Bash(git status:*)",
+        "Bash(git log:*)",
+        "Bash(git diff:*)",
+        "Bash(git show:*)",
+        "Bash(ls:*)",
+        "Bash(dir:*)",
+        "Bash(cat:*)",
+        "Bash(head:*)",
+        "Bash(tail:*)",
+        "Bash(type:*)",
+        "Bash(findstr:*)",
+        "Bash(where:*)",
+        "Bash(which:*)",
+        "Bash(wc:*)",
+        "Bash(du:*)",
+        "Bash(df:*)",
+        "Bash(tasklist:*)",
+        "Bash(systeminfo:*)",
+        "Bash(date:*)",
+        "Bash(whoami:*)",
+        "Bash(hostname:*)",
+        "Bash(ipconfig:*)",
     )
+    # `manual` refuses anything not allowlisted and reports it, which is what
+    # gives you the spoken yes-or-no. `auto` is the CLI default and lets file
+    # writes under the working directory happen with no announcement at all.
+    permission_mode: str = "manual"
     turn_timeout_s: float = 180.0
     # Resume the previous conversation on startup, so Vesper remembers
     # yesterday. Bounded, because a resumed session carries its whole history.
@@ -74,19 +109,31 @@ class VoiceSettings:
     speed: float = 1.15
     volume: float = 0.9
     sapi_voice_hint: str = ""
+    # How the voice is finished: natural, jarvis or broadcast. See
+    # vesper/tts/shaping.py. `natural` is Piper untouched.
+    character: str = "jarvis"
 
 
 @dataclass
 class ListeningSettings:
     device: int | str | None = None
-    whisper_model: str = "base.en"
+    # small.en: base.en could not reliably hear the wake word on a
+    # real voice, waking on only two of nine attempts.
+    whisper_model: str = "small.en"
     wake_required: bool = True
-    follow_up_window_s: float = 25.0
+    # 0 means the wake word is required every single time.
+    follow_up_window_s: float = 0.0
     end_silence_ms: int = 700
     max_utterance_s: float = 30.0
-    half_duplex: bool = False
+    # True by default because most people are on laptop speakers, where
+    # full duplex means it cuts itself off on almost every reply.
+    half_duplex: bool = True
     barge_in_blocks: int = 3
     self_mute_ms: int = 250
+    tail_mute_ms: int = 350
+    # Cores transcription may use. Unset it takes every physical core,
+    # and that burst is the one moment an always-on assistant is felt.
+    cpu_threads: int = 4
 
 
 @dataclass
@@ -95,6 +142,42 @@ class ProactiveSettings:
     check_interval_s: float = 120.0
     min_interval_s: float = 900.0
     quiet_hours: str = "23:30-08:00"
+
+
+@dataclass
+class ConsentSettings:
+    """Asking before changing anything.
+
+    Disabling this does not make Vesper act freely, it makes it unable to act:
+    the CLI still refuses, there is just no longer a way to say yes.
+    """
+
+    enabled: bool = True
+    # How long a spoken yes still refers to the thing that was asked. Only
+    # speech addressed to Vesper can answer, so a bare "yes" works inside the
+    # follow-up window and takes the wake word after it.
+    window_s: float = 45.0
+    # Every approval and refusal, appended as one line. Blank disables it.
+    log: str = "var/actions.log"
+    # Copies of files an approved action is about to change, so "undo that"
+    # can put them back. Blank makes every approved change permanent.
+    undo_dir: str = "var/undo"
+
+
+@dataclass
+class RuntimeSettings:
+    """How it behaves when nobody launched it from a terminal."""
+
+    # A notification-area icon. Not decoration: without a console there is no
+    # other way to pause or stop it short of Task Manager, which skips the exit
+    # path and leaves the claude child running.
+    tray: bool = True
+    # Where diagnostics go when there is no terminal to print them to. Blank
+    # disables, which means a hidden failure is invisible.
+    log: str = "var/vesper.log"
+    # Your enrolled voice. Blank, or never enrolled, means every voice is
+    # accepted, which is exactly how it behaved before this existed.
+    voiceprint: str = "var/voiceprint.json"
 
 
 @dataclass
@@ -110,6 +193,8 @@ class Config:
     voice: VoiceSettings = field(default_factory=VoiceSettings)
     listening: ListeningSettings = field(default_factory=ListeningSettings)
     proactive: ProactiveSettings = field(default_factory=ProactiveSettings)
+    consent: ConsentSettings = field(default_factory=ConsentSettings)
+    runtime: RuntimeSettings = field(default_factory=RuntimeSettings)
     ui: UISettings = field(default_factory=UISettings)
 
     def voices_path(self) -> Path:
@@ -121,6 +206,30 @@ class Config:
 
     def session_path(self) -> Path:
         return ROOT / "var" / "session.json"
+
+    def audit_path(self) -> Path | None:
+        if not self.consent.log:
+            return None
+        path = Path(self.consent.log)
+        return path if path.is_absolute() else ROOT / path
+
+    def undo_path(self) -> Path | None:
+        if not self.consent.undo_dir:
+            return None
+        path = Path(self.consent.undo_dir)
+        return path if path.is_absolute() else ROOT / path
+
+    def log_path(self) -> Path | None:
+        return self._under_root(self.runtime.log)
+
+    def voiceprint_path(self) -> Path | None:
+        return self._under_root(self.runtime.voiceprint)
+
+    def _under_root(self, value: str) -> Path | None:
+        if not value:
+            return None
+        path = Path(value)
+        return path if path.is_absolute() else ROOT / path
 
 
 # --- loading ----------------------------------------------------------------
@@ -175,6 +284,8 @@ def load(path: Path | str | None = None) -> Config:
         voice=_build(VoiceSettings, raw.get("voice")),
         listening=_build(ListeningSettings, raw.get("listening")),
         proactive=_build(ProactiveSettings, raw.get("proactive")),
+        consent=_build(ConsentSettings, raw.get("consent")),
+        runtime=_build(RuntimeSettings, raw.get("runtime")),
         ui=_build(UISettings, raw.get("ui")),
     )
 

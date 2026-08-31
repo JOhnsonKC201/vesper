@@ -15,6 +15,7 @@ answers phantom sentences is worse than one that mishears.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -61,12 +62,22 @@ class WhisperConfig:
     model: str = "base.en"
     device: str = "auto"
     compute_type: str = "auto"
+    # Cores CTranslate2 may use while transcribing. Left unset it takes every
+    # physical core, and although a transcription is only about half a second,
+    # that half second is the one moment an always-on assistant can make the
+    # machine feel slow. 0 restores the take-everything default.
+    cpu_threads: int = 4
     language: str | None = "en"
     beam_size: int = 5
     short_clip_s: float = 3.0
     min_duration_s: float = 0.35
     min_rms: float = 0.003
     word_confidence_floor: float = 0.55
+    # The model's own confidence, which was being measured and then ignored.
+    # An always-on assistant hands Whisper near-silence all day, and it answers
+    # with fluent invented English rather than with nothing.
+    max_no_speech: float = 0.72
+    min_logprob: float = -1.15
     # Biases the decoder toward words this user actually says. Measured on
     # en_GB-alan speech: without it, "Vesper" came back as "Vespa" or "best
     # but" and the assistant simply never woke up. With it, three for three.
@@ -88,6 +99,56 @@ def wake_word_prompt(words, name: str = "") -> str:
         + "."
     )
 
+
+def _is_repetitive(text: str) -> bool:
+    """Does this look like the decoder stuck in a loop rather than speech?
+
+    Both patterns are from a real log: "Choo, choo, choo, choo, choo." and
+    "I don't know if you can hear me, but I don't know if you can hear me."
+    People repeat themselves, but not like this, and the cost of being wrong is
+    one missed sentence against a turn spent on nothing.
+    """
+    words = [w for w in re.findall(r"[a-z']+", text.lower()) if w]
+    if len(words) < 4:
+        return False
+
+    # The same word four times over, consecutively.
+    run = 1
+    for previous, current in zip(words, words[1:]):
+        run = run + 1 if current == previous else 1
+        if run >= 4:
+            return True
+
+    # Or a phrase said twice with almost nothing else in between.
+    if len(words) >= 8 and len(set(words)) / len(words) <= 0.42:
+        return True
+
+    half = len(words) // 2
+    if len(words) >= 8 and words[:half] == words[half:half * 2]:
+        return True
+
+    # Or the same run of words appearing twice with a joining word wedged in,
+    # which is the shape the decoder actually produced: "I don't know if you
+    # can hear me, but I don't know if you can hear me." A whole clause said
+    # twice is the model looping, not a person speaking.
+    longest = _longest_repeated_run(words)
+    return longest >= 4 and (2 * longest) / len(words) >= 0.6
+
+
+def _longest_repeated_run(words: list[str]) -> int:
+    """Length of the longest word sequence that occurs more than once."""
+    seen: dict[tuple[str, ...], int] = {}
+    longest = 0
+    # Bounded so a long dictation cannot make this quadratic in a hot path.
+    for size in range(4, min(len(words) // 2, 12) + 1):
+        seen.clear()
+        for start in range(len(words) - size + 1):
+            gram = tuple(words[start : start + size])
+            if gram in seen and start - seen[gram] >= size:
+                longest = max(longest, size)
+                break
+            seen.setdefault(gram, start)
+    return longest
 
 class Listener:
     """Transcribes float32 mono audio at 16kHz."""
@@ -114,7 +175,12 @@ class Listener:
             compute = "float16" if device == "cuda" else "int8"
 
         started = time.monotonic()
-        self._model = WhisperModel(self.config.model, device=device, compute_type=compute)
+        self._model = WhisperModel(
+            self.config.model,
+            device=device,
+            compute_type=compute,
+            cpu_threads=max(0, self.config.cpu_threads),
+        )
         self.resolved_model = self.config.model
         self.resolved_device = device
         self._log(
@@ -204,12 +270,50 @@ class Listener:
         return ""
 
     def _post_gate(self, transcript: Transcript) -> str:
+        """Reject what the model invented rather than heard.
+
+        Whisper does not return nothing when handed near-silence. It returns
+        confident, well-formed English, and an always-on assistant feeds it
+        near-silence all day. Every check below comes from a real session log.
+        """
         if not transcript.text:
             return "no-text"
-        # Only treat stock phrases as hallucinations on short clips. On a long
-        # clip "thank you" is probably a real thing the user said.
-        if transcript.duration_s < 2.0:
-            stripped = transcript.text.strip().lower()
-            if stripped in HALLUCINATIONS:
-                return "hallucination"
+
+        stripped = transcript.text.strip().lower()
+
+        # The worst one, because it wakes him. Handed quiet room tone, Whisper
+        # echoes its own initial_prompt back as your speech: "Talking to an
+        # assistant named Vesper, also called Jarvis." That contains the wake
+        # word, so it woke Vesper and spent a turn on a sentence nobody said.
+        if self._echoes_the_prompt(stripped):
+            return "prompt-echo"
+
+        # Loops. "Choo, choo, choo, choo, choo." and "one more, one more, one
+        # more, one more" are what the decoder does when there is nothing to
+        # decode. Real speech does not repeat one token five times.
+        if _is_repetitive(stripped):
+            return "looping"
+
+        # The model's own opinion, which was being collected and then ignored.
+        if transcript.no_speech_prob > self.config.max_no_speech:
+            return "silence"
+        if transcript.avg_logprob < self.config.min_logprob:
+            return "low-confidence"
+
+        # Stock filler, only on short clips. On a long one "thank you" is
+        # probably a real thing somebody said.
+        if transcript.duration_s < 2.0 and stripped in HALLUCINATIONS:
+            return "hallucination"
         return ""
+
+    def _echoes_the_prompt(self, stripped: str) -> bool:
+        """Is this the initial_prompt coming back at us?"""
+        prompt = (self.config.initial_prompt or "").strip().lower()
+        if not prompt:
+            return False
+        cleaned = stripped.strip(" .,!?")
+        target = prompt.strip(" .,!?")
+        if cleaned == target:
+            return True
+        # It also comes back truncated, so a long prefix of the prompt counts.
+        return len(cleaned) >= 18 and target.startswith(cleaned)

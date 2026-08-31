@@ -162,8 +162,15 @@ class Endpointer:
         self._speech_ms = self._silence_ms = self._collected_ms = 0.0
         self.vad.reset()
 
-    def feed(self, block: np.ndarray, preroll: np.ndarray | None = None) -> np.ndarray | None:
-        """Add one block. Returns a complete utterance, or None."""
+    def feed(self, block: np.ndarray, preroll=None) -> np.ndarray | None:
+        """Add one block. Returns a complete utterance, or None.
+
+        `preroll` may be an array or a callable returning one. Prefer the
+        callable: this runs 33 times a second forever, and the pre-roll is used
+        only at the instant an utterance opens. Passing the array meant building
+        and discarding roughly 830 KB every second of silence, which is most of
+        the day.
+        """
         block = np.asarray(block, dtype=np.float32).reshape(-1)
         if block.size == 0:
             return None
@@ -180,8 +187,9 @@ class Endpointer:
                     # first syllable is not clipped.
                     self._collecting = True
                     self._chunks = []
-                    if preroll is not None and preroll.size:
-                        self._chunks.append(np.asarray(preroll, dtype=np.float32))
+                    lead = preroll() if callable(preroll) else preroll
+                    if lead is not None and lead.size:
+                        self._chunks.append(np.asarray(lead, dtype=np.float32))
                     self._chunks.extend(self._candidate)
                     self._collected_ms = sum(
                         1000.0 * c.size / self.sample_rate for c in self._chunks

@@ -76,8 +76,12 @@ def test_the_wake_word_is_not_sent_to_claude():
     conv._on_utterance(audio())
     settle(speaker)
     speaker.close()
-    assert "how is the disk" in brain.asked[0]
-    assert "Vesper" not in brain.asked[0]
+    # Only the spoken part is checked. The machine context above it is read
+    # live from this machine, and asserting on the whole payload made the test
+    # fail whenever the foreground window happened to be titled "Vesper".
+    utterance = brain.asked[0].split("[end context]")[-1]
+    assert "how is the disk" in utterance
+    assert "Vesper" not in utterance
 
 
 def test_machine_context_is_attached_to_every_turn():
@@ -339,22 +343,29 @@ def test_a_brain_error_is_spoken_rather_than_swallowed():
     assert ui.errors == ["I lost my connection to Claude."]
 
 
-def test_permission_requests_reach_the_ui():
+def test_permission_requests_reach_the_ui_and_are_asked_out_loud():
     from vesper.brain.protocol import PermissionNeeded, TurnComplete
 
     class AskingBrain(FakeBrain):
         def ask(self, text):
             self.asked.append(text)
-            yield PermissionNeeded("Write", "C:/notes.txt")
-            yield TurnComplete(text="I need your okay to write that file.", turns=1)
+            yield PermissionNeeded(
+                "Write", "C:/notes.txt", tool_input={"file_path": "C:/notes.txt"}
+            )
+            yield TurnComplete(text="I want to save that note.", turns=1)
 
     conv, _, _, voice, speaker, ui = build(transcripts=["Vesper save a note"])
     conv.brain = AskingBrain()
     conv._on_utterance(audio())
     settle(speaker)
     speaker.close()
-    assert ui.permissions == [("Write", "C:/notes.txt")]
-    assert voice.lines == ["I need your okay to write that file."]
+    assert ui.permissions == [("Write", "Write: C:/notes.txt")]
+    # The answer is spoken first, then the question, so Vesper never talks over
+    # its own explanation of what it was trying to do.
+    assert voice.lines == [
+        "I want to save that note.",
+        "I want to create notes dot txt. Do I do this for you?",
+    ]
 
 
 # --- helpers ----------------------------------------------------------------

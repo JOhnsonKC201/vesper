@@ -43,6 +43,9 @@ class FakeBrain:
         self.total_cost_usd = 0.0
         self.turn_count = 0
         self.tools_to_report: list[tuple[str, str]] = []
+        self.grants: tuple[str, ...] = ()
+        self.grant_history: list[tuple[str, ...]] = []
+        self.revoked = False
 
     def start(self, **kwargs):
         self.started = True
@@ -55,6 +58,21 @@ class FakeBrain:
 
     def note(self, text):
         self.notes.append(text)
+
+    # Permission grants. Recorded rather than simulated: what matters to the
+    # loop is that a yes widens the allowlist and that the widening is handed
+    # back afterwards, both of which are observable here.
+    def grant(self, specs):
+        self.grants = tuple(specs)
+        self.grant_history.append(tuple(specs))
+
+    def revoke(self):
+        self.grants = ()
+
+    def revoke_soon(self):
+        self.revoked = True
+        self.revoke()
+        return None
 
     def ask(self, text):
         self.asked.append(text)
@@ -167,6 +185,8 @@ class RecordingUI:
         self.warnings: list[str] = []
         self.interruptions: list[int] = []
         self.states: list[str] = []
+        self.decisions: list[tuple[str, str]] = []
+        self.notes: list[str] = []
 
     def heard(self, text, addressed):
         self.heard_lines.append((text, addressed))
@@ -183,6 +203,9 @@ class RecordingUI:
     def permission(self, tool, detail):
         self.permissions.append((tool, detail))
 
+    def decision(self, decision, action):
+        self.decisions.append((decision, action))
+
     def answered(self, turn, total_s, first_speech_s):
         self.answers.append(turn)
 
@@ -197,6 +220,9 @@ class RecordingUI:
 
     def warn(self, message):
         self.warnings.append(message)
+
+    def info(self, message):
+        self.notes.append(message)
 
 
 @pytest.fixture

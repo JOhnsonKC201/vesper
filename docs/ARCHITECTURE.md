@@ -184,6 +184,120 @@ anyway. A stray asterisk read aloud as "asterisk" breaks the illusion instantly.
 
 ---
 
+## Consent
+
+Vesper reads without asking and changes nothing without a spoken yes. The
+interesting part is where that boundary is enforced, because three of the four
+obvious places to put it are worthless.
+
+**Not in the prompt.** "Ask before writing files" is a request, and a model that
+drifts, or that has just read a file telling it otherwise, can fail to honour
+it. The prompt shapes how the refusal *sounds*; it must not be the thing doing
+the refusing.
+
+**Not in the tool list alone.** Leaving `Write` out of `--tools` stops the Write
+tool and stops nothing else. Measured against the real CLI: asked to create a
+file with `Write` unavailable, Claude ran `mkdir -p … && printf 'hello' > file`
+and reported success.
+
+**Not in an allowlist containing bare `Bash`.** The same hole, one step further
+in. `Bash(python*)` has it too, since `python -c` writes files, deletes them and
+opens sockets. The original read allowlist had exactly that entry.
+
+**In the CLI's permission layer.** `--permission-mode manual` plus an allowlist
+of specific read-only verbs refuses everything else before it runs, and emits a
+`system/permission_denied` frame naming the tool. That frame is the whole
+mechanism. With a narrow list, every bypass route above is refused, including
+output redirection inside an otherwise-allowed command.
+
+The flow:
+
+```
+  claude tries Write --> CLI refuses --> permission_denied frame
+                                               |
+                      ActionRequest <-----------+   (input recovered from the
+                             |                       preceding tool_use frame)
+                             v
+               "I want to create notes dot txt. Do I do this for you?"
+                             |
+         +-------------------+--------------------+
+       "yes"             "no", something else, or nothing
+         |                   |
+    grant one verb      log it, tell Claude to drop it
+    respawn --resume
+    run the action
+    revoke, respawn
+```
+
+Four decisions inside that are load-bearing:
+
+**The denial frame does not carry the tool's input**, only its name. "I want to
+run a command, shall I?" is not a question anyone can answer, so `StreamParser`
+remembers tool calls by id for the length of a turn and joins the input back on.
+
+**A grant is a respawn.** The CLI fixes its allowlist at spawn, so a running
+process cannot be widened. That is affordable precisely because it only happens
+when someone has just said yes out loud, and `--resume` carries the conversation
+across it.
+
+**A grant is one verb, handed back immediately.** `git commit` produces
+`Bash(git commit:*)`, never bare `Bash`, so an approval cannot be spent on
+something else. Revocation runs behind the answer being spoken and takes the
+busy lock, so the next turn waits for read-only rather than racing it. Deferring
+it to the next question would have been simpler and wrong: the ambient loop
+shares this brain, and an unattended proactive turn could inherit permission
+given for something else entirely.
+
+**Only a yes approves.** Silence, an unrelated question and a "yes but" all
+leave the request unapproved, and it expires after `consent.window_s` so a yes
+meant for something else cannot land on a stale request. Every outcome is
+appended to `var/actions.log`, since spoken consent leaves no other trace.
+
+One consequence worth knowing: the persona has to tell Claude to *attempt* the
+action rather than announce it. An earlier wording ("say what you want to do")
+produced a turn where it described the write in prose without calling the tool,
+so no denial frame was emitted, so nothing was asked, and a spoken "yes" would
+have landed on nothing. The gate only fires if the attempt is real.
+
+### Two prompts that were not enough
+
+Both of these were written as instructions first, and both had to become code.
+
+**Claude narrating the refusal.** After being stopped it would add its own
+sentence in front of the question: "Waiting on you.", or worse, "That was
+blocked, not by the approval layer, but by the sandbox's allowed directories",
+which was simply wrong. It does not know why it was stopped and guesses badly.
+The prompt was changed to forbid this by name, and the very next run said
+"Waiting on you for that one." So `is_refusal_noise` in `persona.py` drops
+sentences that only restate a refusal, and only within a turn that was actually
+refused, so asking "why was that blocked?" later still gets an answer. Same
+backstop, same reasoning, as `clean_for_speech` for markdown.
+
+**Undo.** Telling the model to be careful is not a recovery mechanism.
+`undo.py` copies the target aside before the grant is issued, never after: once
+the process is respawned with the permission, the action can happen at any
+moment. "Undo that" is handled locally alongside the mute phrases, because it is
+what you say when something has gone wrong and it must not depend on the network
+or on Claude's memory of what it changed.
+
+Undo refuses to guess. A removal command containing a glob, a variable, a
+redirect or a chain returns no targets at all rather than a partial list, since
+a wrong answer means silently missing a file. Anything it cannot reverse gets a
+specific sentence explaining why, because "no" on its own is not an answer.
+
+### Checking the gate from outside
+
+`vesper/gatecheck.py` asks the real CLI to write a file it must not be allowed
+to write, and fails the self check if it succeeds, if it is refused without a
+report, or if the child errors. It runs last in `--check` because it is the only
+step that costs a turn, and it is the only step whose failure is dangerous.
+
+A self test that cannot fail is worse than none, so it was verified in both
+directions against claude 2.1.250: `manual` gives `refused and reported`, and
+`auto` gives `the write went through`.
+
+---
+
 ## Ambient awareness
 
 `sensors/` reads the foreground window, idle time and machine vitals. The
@@ -235,7 +349,7 @@ while it is mid-sentence.
 
 ## Testing
 
-260 tests, 84% coverage, 13 seconds, no microphone or speakers required.
+435 tests, 86% coverage, 27 seconds, no microphone or speakers required.
 
 The interesting part is what is faked and what is not.
 

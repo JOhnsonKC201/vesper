@@ -114,12 +114,22 @@ class ProactiveLoop:
         Public and synchronous so the whole policy is testable without threads.
         """
         self.checks += 1
+
+        # The cheap snapshot answers every gate and keeps the comparison
+        # baseline fresh. Enumerating every process on the machine, which is
+        # the expensive part by three orders of magnitude, is held back until
+        # we know we might actually say something. It used to run every two
+        # minutes regardless: muted, inside quiet hours, and while you were
+        # away from the keyboard.
+        current = sensors.take()
+        if self._blocked(current):
+            self._previous = current
+            return ""
+
+        # Past the gates. The process list is worth its cost now, and only
+        # because it names the busiest process when CPU has spiked.
         current = sensors.take(include_processes=True)
         previous, self._previous = self._previous, current
-
-        blocked = self._blocked(current)
-        if blocked:
-            return ""
 
         signals = sensors.changes_since(previous, current)
         # Window switches alone are context, not news. Without this gate a

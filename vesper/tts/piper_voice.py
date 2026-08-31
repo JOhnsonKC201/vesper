@@ -19,6 +19,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .shaping import NATURAL, Character, shape
+
 _BLOCK_FRAMES = 1024
 
 
@@ -32,6 +34,7 @@ class PiperTTS:
         speed: float = 1.0,
         volume: float = 1.0,
         name: str = "",
+        character: Character | None = None,
     ) -> None:
         from piper import PiperVoice  # imported late: heavy, and optional
 
@@ -42,15 +45,23 @@ class PiperTTS:
         self._voice = PiperVoice.load(self._model_path)
         self.name = name or self._model_path.stem
         self.sample_rate = int(getattr(self._voice.config, "sample_rate", 22050))
+        self.character = character or NATURAL
 
         from piper.config import SynthesisConfig
 
         # length_scale is inverse speed: larger stretches the audio out. Piper's
         # default of 1.0 reads a touch slow for conversation.
+        #
+        # The two noise scales are the character's, not the speed's. They decide
+        # how much the delivery wanders in pitch and timing, which is the
+        # difference between a voice that sounds chatty and one that sounds
+        # composed. No filter applied afterwards can produce that.
         self._syn = SynthesisConfig(
             length_scale=1.0 / max(speed, 0.1),
             volume=max(0.0, min(volume, 1.0)),
             normalize_audio=True,
+            noise_scale=self.character.noise_scale,
+            noise_w_scale=self.character.noise_w_scale,
         )
         self._stream = None
         self._lock = threading.Lock()
@@ -83,7 +94,11 @@ class PiperTTS:
                 for chunk in self._voice.synthesize(text, syn_config=self._syn):
                     if stop.is_set():
                         break
-                    samples = np.asarray(chunk.audio_int16_array, dtype=np.int16)
+                    samples = shape(
+                        np.asarray(chunk.audio_int16_array, dtype=np.int16),
+                        self.sample_rate,
+                        self.character,
+                    )
                     for start in range(0, len(samples), _BLOCK_FRAMES):
                         if stop.is_set():
                             break
@@ -102,7 +117,11 @@ class PiperTTS:
     def synthesize(self, text: str) -> np.ndarray:
         """Render to samples without playing. Used by tests and the audio harness."""
         parts = [
-            np.asarray(chunk.audio_int16_array, dtype=np.int16)
+            shape(
+                np.asarray(chunk.audio_int16_array, dtype=np.int16),
+                self.sample_rate,
+                self.character,
+            )
             for chunk in self._voice.synthesize(text, syn_config=self._syn)
         ]
         return np.concatenate(parts) if parts else np.zeros(0, dtype=np.int16)

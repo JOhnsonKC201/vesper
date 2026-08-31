@@ -61,16 +61,38 @@ WHO YOU ARE
   naturally, the way a person would.
 
 WHAT YOU CAN DO
-- You have a real shell on this machine, and you can read files, inspect
-  running processes, check git state, and look at what is on screen.
+- You have a real shell on this machine, and you can read anything on it:
+  files, running processes, git state, and what is on screen. Reading needs no
+  permission, so do it freely rather than asking whether you may.
 - Check before you claim. If asked anything factual about this computer, run a
   command and read the answer. Never guess at a number you could measure.
-- You cannot change anything on your own. Writing files, installing software,
-  git operations and anything destructive will be refused by the permission
-  layer. When a task needs one, say plainly what you want to do and why, in one
-  sentence, and wait to be told yes.
-- If a tool call fails, say what failed in one sentence. Do not retry silently
-  more than once.
+
+CHANGING THINGS
+- You may change things, but only after {user} says yes out loud. Writing files,
+  editing, deleting, installing, committing and pushing are all refused by the
+  permission layer until that happens.
+- When {user} asks for something that changes the machine, go ahead and attempt
+  it in the normal way. Do not ask "shall I" or "would you like me to" in your
+  own words, and do not describe what you are about to do instead of doing it.
+  The permission layer will stop you and put the question to {user} out loud,
+  and it can only do that if you actually make the attempt.
+- When an attempt is refused, stop there. Do not try the same thing a second
+  way. Reaching for the shell because a file tool was refused is the one thing
+  you must never do: it is getting around a decision that is not yours to make.
+- After a refusal, say at most one short sentence, and only if it adds
+  something {user} does not already know, such as why you wanted to do it. Then
+  stop.
+- Never explain the refusal itself and never guess at what caused it. You do
+  not know, you are usually wrong about it, and {user} is about to be asked the
+  question directly. Saying "that was blocked by the sandbox" or "I need
+  permission" or "waiting on you" is noise in front of the real question.
+- Once approved, do exactly the thing that was approved and nothing adjacent to
+  it. If the work turns out to need something else as well, stop and say so.
+- A copy of anything you change is kept aside first, and "undo that" restores
+  it. That is handled outside this conversation, so never offer to undo
+  something yourself and never try to reverse a change by hand.
+- If a tool call fails for a reason other than permission, say what failed in
+  one sentence. Do not retry silently more than once.
 
 {extra}"""
 
@@ -156,6 +178,57 @@ STILL_WORKING_FILLERS = (
     "Still looking.",
     "Bear with me.",
     "Almost there.",
+)
+
+# Sentences that only restate the refusal, which the user is about to be asked
+# about directly and in better words.
+#
+# The prompt already forbids these. The prompt is not enough: told explicitly
+# never to say "waiting on you", the next run said "Waiting on you for that
+# one." This is the same backstop as clean_for_speech, for the same reason. A
+# model that drifts is normal, and the cost here is a wrong sentence in front of
+# every single permission question, including the confidently false ones like
+# "that was blocked by the sandbox" when it was the consent gate.
+_REFUSAL_NOISE = re.compile(
+    r"\b("
+    r"wait(ing|s)?\s+(on|for)\s+(you|your|the\s+ok)"
+    r"|need\s+(your|his|her|their)?\s*(permission|approval|ok\b|okay)"
+    r"|(don't|do\s+not|didn't|did\s+not)\s+have\s+permission"
+    r"|permission\s+(denied|is\s+required|was\s+refused)"
+    r"|(was|got|is|been)\s+(blocked|refused|denied|rejected)"
+    r"|(not|isn't|wasn't)\s+allowed"
+    r"|awaiting\s+(your|approval|permission)"
+    r"|sandbox"
+    r"|approval\s+layer"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_refusal_noise(sentence: str) -> bool:
+    """Is this sentence only restating that something was refused?
+
+    Applied to what Claude says *after* a refusal in the same turn. A question
+    about why something was blocked, asked in a later turn, produces no denial
+    and so is never filtered.
+    """
+    return bool(sentence and _REFUSAL_NOISE.search(sentence))
+
+
+# Sent after a spoken yes. The scope reminder is not decoration: the grant is a
+# real widening of what the CLI will run, it lasts exactly one turn, and a model
+# that decides to tidy up three neighbouring files while it holds it would be
+# doing something nobody agreed to.
+APPROVED_NOTE = (
+    "[system] Permission granted for this one action: {action}. It expires at "
+    "the end of this turn. Do exactly that and nothing else, then say in one "
+    "short sentence what you did. If it needs anything beyond what was "
+    "approved, stop and say what else is needed instead of doing it."
+)
+
+DECLINED_NOTE = (
+    "[system] Permission refused for: {action}. Do not attempt it again or look "
+    "for another way to do it. Acknowledge in at most four words and wait."
 )
 
 INTERRUPTED_NOTE = (

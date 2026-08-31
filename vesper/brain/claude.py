@@ -49,8 +49,15 @@ class BrainConfig:
     allowed_tools: tuple[str, ...] = ()
     add_dirs: tuple[str, ...] = ()
     turn_timeout_s: float = 180.0
+    # `manual` is what makes the allowlist mean anything. Measured against the
+    # real CLI: without it the session runs in `auto`, where the allowlist is
+    # largely advisory and a Write to a path under cwd goes through unannounced.
+    # With it, every call outside the allowlist is refused before it happens and
+    # reported as a permission_denied frame. Set to "auto" only if you want a
+    # Vesper that acts without asking.
+    permission_mode: str = "manual"
 
-    def argv(self, resume_session: str = "") -> list[str]:
+    def argv(self, resume_session: str = "", grants: tuple[str, ...] = ()) -> list[str]:
         args = [
             self.executable,
             "-p",
@@ -63,10 +70,16 @@ class BrainConfig:
             "--model", self.model,
             "--system-prompt", self.system_prompt,
         ]
+        if self.permission_mode:
+            args += ["--permission-mode", self.permission_mode]
         if self.tools:
             args += ["--tools", ",".join(self.tools)]
-        if self.allowed_tools:
-            args += ["--allowedTools", ",".join(self.allowed_tools)]
+        # Grants are the one-shot widening earned by a spoken yes. They ride on
+        # the same flag as the standing read-only allowlist and last exactly as
+        # long as the process they were passed to.
+        allowed = tuple(dict.fromkeys(self.allowed_tools + tuple(grants)))
+        if allowed:
+            args += ["--allowedTools", ",".join(allowed)]
         for directory in self.add_dirs:
             args += ["--add-dir", directory]
         if resume_session:
@@ -93,6 +106,9 @@ class ClaudeBrain:
         self.last_turn: TurnComplete | None = None
         self.total_cost_usd: float = 0.0
         self.turn_count: int = 0
+        # Permissions the user granted out loud, live only for the process they
+        # were spawned with. Empty is the resting state and the safe one.
+        self._grants: tuple[str, ...] = ()
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -110,10 +126,15 @@ class ClaudeBrain:
         """
         return self._busy.locked()
 
+    @property
+    def grants(self) -> tuple[str, ...]:
+        """What the running process is currently permitted beyond reading."""
+        return self._grants
+
     def start(self, *, resume: bool = False) -> None:
         if self.alive:
             return
-        argv = self.config.argv(self.session_id if resume else "")
+        argv = self.config.argv(self.session_id if resume else "", self._grants)
         self._log("spawning brain: " + " ".join(argv[:8]) + " ...")
 
         env = dict(os.environ)
@@ -157,6 +178,59 @@ class ClaudeBrain:
         """Respawn, resuming the same conversation if we have a session id."""
         self.stop()
         self.start(resume=bool(self.session_id))
+
+    # --- permission grants --------------------------------------------------
+
+    def grant(self, specs) -> None:
+        """Widen the allowlist for the next turn, after a spoken yes.
+
+        The CLI fixes its allowlist at spawn, so a grant means a respawn. That
+        is affordable precisely because it only happens when the user has just
+        agreed to something: the conversation itself survives via --resume, and
+        a second of process start is invisible next to the sentence Vesper is
+        about to speak.
+        """
+        specs = tuple(dict.fromkeys(s for s in specs if s))
+        if not specs:
+            return
+        # Under the same lock ask() uses. Without it, a yes arriving while the
+        # ambient loop was mid-turn tore that turn's process down underneath
+        # it, and the old process's reader threads went on feeding a queue the
+        # new process now owned.
+        with self._busy:
+            self._grants = specs
+            self._log("granted for one turn: " + ", ".join(specs))
+            self.stop()
+            self.start(resume=bool(self.session_id))
+
+    def revoke(self) -> None:
+        """Drop back to read-only. Called as soon as the approved turn ends.
+
+        Not deferred to the next question: the ambient loop shares this brain,
+        and a grant left standing would let an unattended proactive turn use
+        permission the user gave for something else entirely.
+        """
+        if not self._grants:
+            return
+        self._grants = ()
+        self._log("grants revoked, back to read only")
+        self.stop()
+        self.start(resume=bool(self.session_id))
+
+    def revoke_soon(self) -> threading.Thread:
+        """Revoke in the background, behind the answer being spoken.
+
+        Returns the thread so tests can join it. The respawn takes the busy
+        lock, so the next question waits for read-only to be restored rather
+        than racing it.
+        """
+        def worker() -> None:
+            with self._busy:
+                self.revoke()
+
+        thread = threading.Thread(target=worker, daemon=True, name="brain-revoke")
+        thread.start()
+        return thread
 
     # --- pumps --------------------------------------------------------------
 
@@ -204,10 +278,12 @@ class ClaudeBrain:
         """
         if not text.strip():
             return
-        if not self.alive:
-            self.start(resume=bool(self.session_id))
 
         with self._busy:
+            # Inside the lock, so a background revoke cannot respawn the
+            # process between the check and the write to its stdin.
+            if not self.alive:
+                self.start(resume=bool(self.session_id))
             self._interrupted.clear()
             process = self._process
             if process is None or process.stdin is None:

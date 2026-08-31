@@ -101,6 +101,24 @@ class TerminalUI:
             body.append(f"  {detail}", style="dim")
         self._line("hold", body)
 
+    def decision(self, decision: str, action: str) -> None:
+        """What was actually decided about a request, and what it now permits.
+
+        Printed in full rather than in the spoken shorthand: "run git commit"
+        is the right thing to hear and the wrong thing to have as the only
+        record of what ran.
+        """
+        style = {
+            "approved": "bold green",
+            "declined": "bold red",
+            "undone": "bold yellow",
+        }.get(decision, "dim")
+        label = {"approved": "ok", "declined": "no", "undone": "undo"}.get(decision, "")
+        body = Text()
+        body.append(decision, style=style)
+        body.append(f"  {action}", style="dim")
+        self._line(label, body)
+
     def spoke(self, text: str) -> None:
         self._line("vesper", text, style="bold cyan", label_style="bold cyan")
 

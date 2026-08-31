@@ -45,8 +45,8 @@ def brain_factory():
         # Prepend the script so the child is `python fake_claude.py ...`.
         original_argv = config.argv
 
-        def argv(resume_session=""):
-            args = original_argv(resume_session)
+        def argv(resume_session="", grants=()):
+            args = original_argv(resume_session, grants)
             return [args[0], str(FAKE)] + args[1:]
 
         config.argv = argv
@@ -272,3 +272,102 @@ def test_tools_and_allowlist_are_comma_joined():
 def test_add_dirs_are_repeated_flags():
     argv = BrainConfig(add_dirs=("C:/a", "C:/b")).argv()
     assert argv.count("--add-dir") == 2
+
+
+# --- permission grants ------------------------------------------------------
+
+
+def test_a_grant_respawns_the_process_and_keeps_the_conversation(brain_factory):
+    """The CLI fixes its allowlist at spawn, so a spoken yes costs a respawn.
+    The session has to survive it or approving something would also forget what
+    was being discussed."""
+    brain = brain_factory(replies=["First.", "Second."])
+    collect(brain, "hello")
+    session = brain.session_id
+    assert session
+
+    brain.grant(("Bash(git commit:*)",))
+    assert brain.grants == ("Bash(git commit:*)",)
+    assert brain.alive, "the brain must come back up after a grant"
+
+    events = collect(brain, "now do it")
+    assert of(events, TurnComplete), "the conversation continues after a grant"
+    assert brain.session_id == session
+
+
+def test_an_empty_grant_changes_nothing(brain_factory):
+    """A refusal Vesper could not describe must not silently widen anything."""
+    brain = brain_factory(replies=["Fine."])
+    collect(brain, "hello")
+    brain.grant(())
+    assert brain.grants == ()
+
+
+def test_revoking_puts_the_permission_back(brain_factory):
+    brain = brain_factory(replies=["Fine.", "Fine."])
+    collect(brain, "hello")
+    brain.grant(("Write",))
+    brain.revoke()
+    assert brain.grants == ()
+    assert "Write" not in " ".join(brain.config.argv("session", brain.grants))
+
+
+def test_a_background_revoke_finishes_before_the_next_question(brain_factory):
+    """The next turn must not race the respawn: if it won, it would run with a
+    permission the user granted for something else.
+
+    The earlier version joined the thread before asserting, which removed the
+    very race it was written to catch. Deleting the lock from revoke_soon would
+    not have failed it."""
+    brain = brain_factory(replies=["Fine.", "Fine."])
+    collect(brain, "hello")
+    brain.grant(("Write",))
+
+    brain.revoke_soon()  # deliberately not joined
+    events = collect(brain, "and again")
+
+    assert of(events, TurnComplete), "the turn raced the respawn and died"
+    assert brain.grants == (), "the turn ran while a grant was still live"
+
+
+def test_a_grant_waits_for_a_turn_that_is_already_running(brain_factory):
+    """A yes can arrive while the ambient loop is mid-turn, since both share one
+    brain. Without the lock, granting tore that turn's process down underneath
+    it and the dead process's reader threads went on feeding the new queue.
+
+    The observable invariant is the lock itself, so that is what is asserted.
+    Tempting alternatives do not work: driving a real turn and granting halfway
+    through passes either way, because `stop()` closes stdin and waits, the fake
+    finishes flushing its reply, and the turn completes cleanly. A test that
+    cannot fail is worse than no test, so this holds the lock directly and
+    checks that `grant()` waits for it.
+    """
+    brain = brain_factory(replies=["fine"])
+    collect(brain, "hello")
+
+    granted = threading.Event()
+    holding = threading.Event()
+
+    def hold_the_turn():
+        with brain._busy:          # what ask() holds for the length of a turn
+            holding.set()
+            time.sleep(0.4)
+
+    holder = threading.Thread(target=hold_the_turn)
+    holder.start()
+    assert holding.wait(5), "never took the lock"
+
+    def do_grant():
+        brain.grant(("Write",))
+        granted.set()
+
+    granter = threading.Thread(target=do_grant)
+    granter.start()
+
+    # Still mid-turn, so the grant must not have gone through yet.
+    assert not granted.wait(0.2), "granted while a turn was still running"
+
+    holder.join(timeout=5)
+    granter.join(timeout=10)
+    assert granted.is_set(), "the grant never completed"
+    assert brain.grants == ("Write",)
