@@ -97,6 +97,11 @@ class Dashboard:
         carries on.
         """
         self._wants_close.set()
+        # A preview is a network call that can outlive the window it was
+        # started from. Left running, its `finally` clears `_voice_busy` long
+        # after the fact, and until then the button on the *reopened* window
+        # silently does nothing. Cancel it and drop the flag here instead.
+        self._cancel_preview()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=timeout)
@@ -217,12 +222,25 @@ class Dashboard:
     def _voice_section(self, tk, root) -> None:
         """The voice picker, preview and the month's remaining allowance.
 
-        `tk.OptionMenu` rather than `ttk.Combobox` because this file has no
-        `ttk` in it and one widget is not worth two look-and-feels in one
-        window. Every widget and every Tk variable made here goes into
-        `_fields`, which `_run` clears on the owning thread. A `StringVar` left
-        on `self` would outlive that and abort the process at exit, which is
-        the same failure the rest of this class is written around.
+        A `tk.Listbox`, and the reason is not taste. The first version used
+        `tk.OptionMenu`, which builds a `Menu` widget, and a menu belongs to
+        the Tk interpreter rather than to the window. Open the dashboard, close
+        it, and open it again: the second interpreter, created on a new thread,
+        cannot build the menu, Tcl calls `Tcl_Panic` with "Failed to create the
+        menu window", and the process dies with exit code 3.
+
+        `scripts/dashboard_soak.py` is what found it, on the second cycle, and
+        it is worth keeping because no unit test can catch this: a panic is not
+        an exception, there is nothing to assert on, and the only symptom is
+        that the process is gone.
+
+        A Listbox also happens to be the better control here, since it shows
+        all eighteen usable voices at once instead of hiding them behind a
+        click.
+
+        Every widget made here goes into `_fields`, which `_run` clears on the
+        owning thread. One left on `self` would be finalised later by the main
+        thread and abort the process in the same way.
         """
         tk.Label(root, text="VOICE", font=("Segoe UI", 8, "bold"),
                  bg=NIGHT, fg=MUTED, anchor="w").pack(fill="x", padx=18, pady=(12, 3))
@@ -233,19 +251,29 @@ class Dashboard:
         row = tk.Frame(panel, bg=PANEL)
         row.pack(fill="x", padx=10, pady=(9, 4))
 
-        names = [voice.label for voice in self._available()]
-        chosen = tk.StringVar(root, value=self._current_label(names))
-        self._fields["voice_var"] = chosen
+        voices = self._available()
+        listbox = tk.Listbox(
+            row, height=5, activestyle="none", bg=PANEL, fg=TEXT,
+            selectbackground=LINE, selectforeground=STAR, font=("Segoe UI", 9),
+            relief="flat", bd=0, highlightthickness=0, exportselection=False,
+            cursor="hand2",
+        )
+        for index, voice in enumerate(voices):
+            listbox.insert("end", f"  {voice.label}")
+            if not getattr(voice, "free", True):
+                listbox.itemconfig(index, foreground=MUTED)
+        if not voices:
+            listbox.insert("end", "  no voices available")
+        listbox.bind("<<ListboxSelect>>", lambda _event: self._pick())
+        listbox.pack(side="left", fill="x", expand=True)
+        self._fields["voice_list"] = listbox
 
-        menu = tk.OptionMenu(row, chosen, *(names or ["no voices"]),
-                             command=lambda _label: self._pick())
-        menu.config(bg=PANEL, fg=TEXT, activebackground=LINE, activeforeground=TEXT,
-                    relief="flat", bd=0, highlightthickness=0, font=("Segoe UI", 9),
-                    anchor="w", cursor="hand2")
-        menu["menu"].config(bg=PANEL, fg=TEXT, activebackground=LINE,
-                            activeforeground=TEXT, bd=0)
-        menu.pack(side="left", fill="x", expand=True)
-        self._fields["voice_menu"] = menu
+        current = self._current_label([v.label for v in voices])
+        for index, voice in enumerate(voices):
+            if voice.label == current:
+                listbox.selection_set(index)
+                listbox.see(index)
+                break
 
         self._fields["voice_preview"] = self._button(tk, row, "Preview", self._preview)
         self._fields["voice_preview"].pack(side="right", padx=(8, 0))
@@ -430,6 +458,16 @@ class Dashboard:
             target=self._preview_worker, args=(voice,), daemon=True,
             name="voice-preview",
         ).start()
+
+    def _cancel_preview(self) -> None:
+        """Stop any preview in flight and let the button work again."""
+        try:
+            if self.voices is not None and hasattr(self.voices, "cancel"):
+                self.voices.cancel()
+        except Exception:
+            pass
+        self._voice_busy.clear()
+        self._voice_note = ""
 
     def _preview_worker(self, voice) -> None:
         try:

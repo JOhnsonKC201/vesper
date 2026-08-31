@@ -264,13 +264,17 @@ def _start_tray(cfg: config_module.Config, conversation, ui):
     # Only when the cloud voice is actually running. With Piper the picker
     # would be a control with one entry and nothing to say, so it is left out
     # of the window entirely rather than shown greyed.
+    #
+    # `conversation.speaker`, not `speaker`. This function receives only cfg,
+    # conversation and ui: the bare name was a local of `build()`, a different
+    # function, so this raised NameError on every launch with the tray on,
+    # which is the default. No test called _start_tray, so it went unnoticed.
+    voice = conversation.speaker.voice
     panel = None
-    if hasattr(speaker.voice, "say_as"):
+    if hasattr(voice, "say_as"):
         from .ui.voicepanel import VoicePanel
 
-        panel = VoicePanel(
-            speaker.voice, choice_path=cfg.voice_choice_path(), log=ui.info
-        )
+        panel = VoicePanel(voice, choice_path=cfg.voice_choice_path(), log=ui.info)
 
     dashboard = Dashboard(
         conversation.status,

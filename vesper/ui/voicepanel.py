@@ -22,10 +22,19 @@ class VoicePanel:
     """Adapts an `ElevenTTS` to what the dashboard asks for."""
 
     def __init__(self, voice, *, choice_path=None, log=None) -> None:
+        import threading
+
         self.voice = voice
         self.choice_path = choice_path
         self._log = log or (lambda message: None)
         self._voices = None
+        # A real stop event rather than a fresh one per call. The first version
+        # passed `threading.Event()` inline, which nothing anywhere could ever
+        # set, so a preview could not be cut off by closing the window or by
+        # anything else. Every other utterance in the system shares the
+        # Speaker's stop event; this one is the panel's own, and `cancel()` is
+        # what the dashboard calls when it closes.
+        self._stop = threading.Event()
 
     # --- what the dashboard calls -------------------------------------------
 
@@ -65,11 +74,12 @@ class VoicePanel:
         network call. `say_as` takes the same lock as ordinary speech, so a
         preview waits its turn rather than talking over a reply in progress.
         """
-        import threading
-
+        self._stop.clear()
         before = self.voice.budget.spent
-        self.voice.say_as(SAMPLE_LINE, voice_id, threading.Event())
+        self.voice.say_as(SAMPLE_LINE, voice_id, self._stop)
         spent = self.voice.budget.spent - before
+        if self._stop.is_set():
+            return "stopped"
 
         reason = self.voice.last_reason
         if reason == "cache":
@@ -78,6 +88,10 @@ class VoicePanel:
             left = max(0, self.voice.budget.cap - self.voice.budget.spent)
             return f"{spent} characters, {left:,} left this month"
         return _explain(reason)
+
+    def cancel(self) -> None:
+        """Cut a preview short. Safe from any thread."""
+        self._stop.set()
 
     def budget(self) -> tuple[int, int]:
         return self.voice.budget.spent, self.voice.budget.cap

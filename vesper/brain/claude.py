@@ -29,6 +29,29 @@ from pathlib import Path
 
 from .protocol import BrainError, Event, StreamParser, TurnComplete, encode_user_message
 
+# Vesper's own secrets, which the child has no use for and every ability to
+# read. The ElevenLabs key is the live example: `config.eleven_key()` documents
+# the environment as the safer place to put it, "so the key need not sit on
+# disk at all", and copying the whole environment into this child undid that.
+#
+# It matters because of what the child is. Once a Bash or interpreter grant is
+# approved, Claude can run arbitrary code, and arbitrary code can read
+# os.environ and send it somewhere. That is a channel entirely outside the
+# "only eleven_api.py touches the network" rule, because that rule is about
+# Vesper's package, not about what Vesper's subprocess is allowed to run.
+_PRIVATE_ENV_PREFIX = "VESPER_"
+
+
+def child_env() -> dict:
+    """The environment the brain gets: ours, minus anything that is a secret."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.upper().startswith(_PRIVATE_ENV_PREFIX)
+    }
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
 # Windows: keep the child's console window from flashing on screen.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -131,14 +154,17 @@ class ClaudeBrain:
         """What the running process is currently permitted beyond reading."""
         return self._grants
 
+    @staticmethod
+    def _child_env() -> dict:
+        return child_env()
+
     def start(self, *, resume: bool = False) -> None:
         if self.alive:
             return
         argv = self.config.argv(self.session_id if resume else "", self._grants)
         self._log("spawning brain: " + " ".join(argv[:8]) + " ...")
 
-        env = dict(os.environ)
-        env["PYTHONIOENCODING"] = "utf-8"
+        env = child_env()
 
         self._process = subprocess.Popen(
             argv,

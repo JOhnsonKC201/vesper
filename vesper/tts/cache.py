@@ -38,6 +38,38 @@ DEFAULT_MAX_BYTES = 12 * 1024 * 1024
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
+# Windows treats these as devices wherever they appear as a filename, with or
+# without an extension. Opening one does not fail cleanly, it can block, and
+# this is read from the speaking thread.
+_DEVICES = frozenset(
+    ["con", "prn", "aux", "nul"]
+    + [f"com{n}" for n in range(1, 10)]
+    + [f"lpt{n}" for n in range(1, 10)]
+)
+
+
+def safe_component(voice_id: str) -> str:
+    """One directory name that cannot be anything but a directory name.
+
+    The obvious version of this substitutes everything outside
+    `[A-Za-z0-9._-]`, and it is wrong in a way that looks right. Dots are in
+    the allowed set, so `..` survives untouched and the cache writes one level
+    above its own root. `../../evil` is caught, because the slashes are
+    replaced, which is exactly why a test using that string passed while the
+    real bypass went unnoticed.
+
+    Voice ids reach here from `config.yaml` and from an ElevenLabs API
+    response, so neither is trusted to be a safe path component.
+    """
+    cleaned = _UNSAFE.sub("_", voice_id or "")[:64]
+    # Anything that is only dots is a relative path, not a name.
+    if not cleaned.strip(".") or cleaned.split(".")[0].lower() in _DEVICES:
+        return "default"
+    # Windows silently strips trailing dots and spaces, so "foo." and "foo"
+    # would be the same directory while looking like different ones.
+    cleaned = cleaned.rstrip(". ")
+    return cleaned or "default"
+
 
 def key_for(text: str) -> str:
     """A stable filename for a line of speech.
@@ -65,9 +97,15 @@ class AudioCache:
     def _dir(self, voice_id: str) -> Path | None:
         if self.root is None:
             return None
-        # A voice id comes from config or the API, so it is not trusted to be a
-        # safe path component.
-        return self.root / (_UNSAFE.sub("_", voice_id or "default")[:64])
+        folder = self.root / safe_component(voice_id)
+        # Belt and braces. `safe_component` is the guard; this is the assertion
+        # that it worked, because the cost of it being wrong is writing outside
+        # the sandbox with no consent gate and no audit entry.
+        try:
+            folder.resolve().relative_to(self.root.resolve())
+        except (ValueError, OSError):
+            return self.root / "default"
+        return folder
 
     def _path(self, voice_id: str, text: str) -> Path | None:
         folder = self._dir(voice_id)

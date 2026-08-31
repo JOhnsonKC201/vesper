@@ -173,8 +173,17 @@ class ElevenTTS:
         cached = self.cache.get(voice_id, text)
         if cached:
             self.last_reason = "cache"
-            self._play(cached, stop)
-            return
+            try:
+                self._play(cached, stop)
+                return
+            except Exception as exc:
+                # The one path that used to escape. `_play` re-raises after
+                # tearing down a dead output device, and the stock phrases are
+                # cache hits by design, so the most frequently spoken lines
+                # were the least protected: a momentarily busy device made
+                # "One moment." vanish silently instead of falling back.
+                self._fall_back(text, stop, type(exc).__name__)
+                return
 
         blocked = self._why_not(text)
         if blocked:
@@ -199,8 +208,23 @@ class ElevenTTS:
         self.fallback.speak(text, stop)
 
     def close(self) -> None:
-        with self._lock:
+        """Release the device. Never waits on a stream that is still running.
+
+        `Speaker.close(timeout=2.0)` joins its worker and then calls this
+        regardless of whether the join succeeded. If this took the lock
+        unconditionally, it would block behind a worker still inside a network
+        read, and the 2 second bound would silently become the 20 second
+        request timeout. Shutdown is the one thing that must not wait on the
+        network, so it tears down either way: `_teardown` only aborts and
+        closes a sounddevice stream, which is safe to do underneath a stalled
+        reader and is exactly what unblocks it.
+        """
+        held = self._lock.acquire(timeout=0.25)
+        try:
             self._teardown()
+        finally:
+            if held:
+                self._lock.release()
         try:
             self.fallback.close()
         except Exception:

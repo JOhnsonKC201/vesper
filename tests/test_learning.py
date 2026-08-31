@@ -338,6 +338,32 @@ def test_forgetting_never_reaches_claude(tmp_path):
     assert any("Forgotten" in line for line in voice.lines)
 
 
+def test_a_correction_stays_silent_even_once_it_takes_effect(tmp_path):
+    """The guard that was never actually reached.
+
+    `test_a_correction_is_learned_without_announcing_itself` sends one
+    correction, and `learn()` returns None for that, so `_maybe_learn` returns
+    at the `stored is None` check before the EXPLICIT comparison is ever
+    evaluated. Deleting that comparison left every test green. This says it
+    twice, so the lesson becomes active and the guard is the only thing
+    keeping him quiet.
+    """
+    conversation, speaker, voice = _conversation(tmp_path, replies=("Right.", "Right."))
+    try:
+        conversation.hear("Vesper, no I meant the other repository")
+        conversation.hear("Vesper, no I meant the other repository")
+        speaker.wait_until_idle(timeout=5)
+    finally:
+        speaker.close()
+
+    assert "the other repository" in conversation.lessons.prompt_block(), (
+        "saying it twice should have made it stick"
+    )
+    assert "I'll remember that." not in voice.lines, (
+        "a correction announced itself; only instructions given outright do"
+    )
+
+
 def test_a_failing_store_never_costs_a_reply(tmp_path):
     """Learning is a nicety. It must never be the reason a question goes
     unanswered."""
@@ -387,5 +413,3 @@ def test_the_acknowledgement_is_one_of_the_prewarmed_phrases():
     from vesper.tts.eleven import STOCK_PHRASES
 
     assert "I'll remember that." in STOCK_PHRASES
-    assert threading is not None
-    assert learning.MAX_IN_PROMPT > 0

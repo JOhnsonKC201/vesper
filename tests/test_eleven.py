@@ -151,14 +151,56 @@ def test_a_corrupt_cache_entry_is_a_miss_not_a_crash(tmp_path, audio):
 
 
 def test_the_cache_evicts_least_recently_used_first(tmp_path):
+    """Least recently *used*, which is not the same as least recently written.
+
+    The first version only inserted and checked that the oldest insert went.
+    That is FIFO, and it passed with `get()`'s `path.touch()` deleted, so a
+    regression turning LRU into FIFO would have shipped green. This reads an
+    early entry back to promote it, which is the only thing that tells the two
+    policies apart.
+    """
+    import time
+
+    # Each entry is 2048 bytes, so a 4096 cap holds exactly two. Three entries
+    # means exactly one eviction, which is what makes the choice observable.
+    # An earlier draft wrote six into the same cap, evicting four, so both
+    # candidates went whatever the policy was.
     cache = AudioCache(tmp_path / "c", max_bytes=4096)
-    for index in range(6):
-        cache.put("V1", f"line {index}", pcm(1024))
+    cache.put("V1", "oldest but used", pcm(1024))
+    time.sleep(0.05)
+    cache.put("V1", "oldest and unused", pcm(1024))
+
+    # NTFS mtime resolution is coarse enough to tie two writes in a tight
+    # loop, and a tie makes the ordering arbitrary rather than wrong.
+    time.sleep(0.05)
+    assert cache.get("V1", "oldest but used") is not None
+    time.sleep(0.05)
+
+    cache.put("V1", "newest", pcm(1024))
 
     assert cache.size() <= 4096
-    # The newest survives, the oldest does not.
-    assert cache.has("V1", "line 5")
-    assert not cache.has("V1", "line 0")
+    assert cache.has("V1", "newest")
+    assert cache.has("V1", "oldest but used"), "reading it did not protect it"
+    assert not cache.has("V1", "oldest and unused")
+
+
+def test_a_month_change_while_running_resets_the_allowance(tmp_path, monkeypatch):
+    """The rollover that actually happens to an always-on process.
+
+    `test_a_new_month_resets_the_allowance` writes a stale month and builds a
+    fresh Budget, so it exercises `_load`, not `_roll`. Deleting `_roll`'s body
+    left it green. This one moves the calendar under a live object.
+    """
+    from vesper.tts import budget as budget_module
+
+    budget = Budget(tmp_path / "b.json", cap=9_000)
+    budget.spend(5_000)
+    assert budget.spent == 5_000
+
+    monkeypatch.setattr(budget_module, "_this_month", lambda: "2099-12")
+
+    assert budget.spent == 0, "the allowance did not reset when the month did"
+    assert budget.allows(9_000)
 
 
 def test_a_voice_id_cannot_escape_the_cache_directory(tmp_path):

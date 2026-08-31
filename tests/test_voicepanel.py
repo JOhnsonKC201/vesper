@@ -147,6 +147,10 @@ def test_the_preview_never_runs_on_the_tk_thread():
     would freeze the window for that long, and a frozen window looks crashed."""
     source = inspect.getsource(dashboard_module.Dashboard._preview)
     assert "Thread(" in source, "the preview blocks the UI thread"
+    # Constructing a Thread and never starting it leaves "Thread(" in the
+    # source while the feature is permanently dead. The first version of this
+    # test could not tell the difference.
+    assert ".start()" in source, "the worker thread is created but never run"
     assert "self.voices.preview" not in source, "the preview is called inline"
 
 
@@ -162,15 +166,43 @@ def test_every_voice_widget_is_registered_for_teardown():
     """`_run`'s finally clears `_fields` on the owning thread. A widget or a
     StringVar left anywhere else is finalised later by the main thread, which
     is the exact Tcl_Panic this class is built to avoid."""
+    import re
+
     source = inspect.getsource(dashboard_module.Dashboard._voice_section)
-    created = source.count("tk.Label(") + source.count("tk.OptionMenu(") \
-        + source.count("tk.StringVar(") + source.count("self._button(")
-    registered = source.count('self._fields["voice')
-    assert registered >= 4, "fewer widgets registered than the section creates"
+
+    # Every construction bound to a name, and every one of them must either be
+    # registered or be a container. The first version computed a `created`
+    # total and then never compared it to anything, so the only live check was
+    # a hardcoded ">= 4" with slack to spare: turning a registered widget into
+    # a bare local left it green while reintroducing the abort.
+    constructed = re.findall(
+        r"^\s*([A-Za-z_][\w\[\]\"'.]*)\s*=\s*(?:tk\.\w+\(|self\._button\()",
+        source,
+        re.M,
+    )
+    assert constructed, "the parser stopped matching; fix it, not the code"
+
+    # Containers can be locals: root.destroy() walks the widget tree and takes
+    # its children with it. A StringVar is not in that tree, which is the whole
+    # reason the registration rule exists.
+    containers = {"panel", "row", "track", "fill", "listbox"}
+    unregistered = [
+        name for name in constructed
+        if not name.startswith("self._fields[") and name not in containers
+    ]
+    assert unregistered == [], (
+        f"{unregistered} are held outside _fields, where _run's finally cannot "
+        f"clear them on the owning thread"
+    )
+
+    assert "tk.OptionMenu(" not in source, (
+        "OptionMenu builds a Menu, and the second Tk interpreter on a new "
+        "thread cannot create one: Tcl_Panic, exit code 3, no traceback. "
+        "scripts/dashboard_soak.py is what caught it."
+    )
     assert "self._voice_var" not in source, (
         "a Tk variable was stashed on self, where _fields.clear() cannot reach it"
     )
-    assert created > 0
 
 
 def test_the_dashboard_works_with_no_voice_panel_at_all():

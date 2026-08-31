@@ -41,6 +41,14 @@ NETWORK_MODULES = {
     "requests", "urllib", "urllib3", "http", "httpx", "aiohttp",
     "ftplib", "telnetlib", "smtplib", "websockets", "websocket",
     "xmlrpc", "socketserver", "paramiko",
+    # Added after a review pointed out the obvious gap: this is a denylist of
+    # names, so it only catches what someone remembered to write down.
+    # asyncio.open_connection opens a raw socket and nothing here was looking
+    # for it. ctypes is deliberately absent rather than forgotten: it is
+    # legitimately used for Win32 window titles in sensors/window.py, so
+    # test_no_module_calls_a_network_dll below checks the thing that actually
+    # matters instead of banning the module.
+    "asyncio",
 }
 
 # The single file allowed to speak HTTP, and the only one. Adding a second name
@@ -101,6 +109,35 @@ def test_only_one_file_may_touch_the_network():
     )
 
 
+def test_no_module_calls_a_network_dll():
+    """The hole an import denylist cannot close.
+
+    `ctypes.windll.wininet` reaches the network with no import this file would
+    ever notice, and ctypes cannot simply be banned because window titles are
+    read through it. So check the thing that would actually be dangerous.
+    """
+    offenders = []
+    for path in source_files():
+        text = path.read_text(encoding="utf-8").lower()
+        for library in ("wininet", "ws2_32", "winhttp", "urlmon", "winsock"):
+            if library in text:
+                offenders.append(f"{path.relative_to(PACKAGE)}: {library}")
+    assert offenders == [], "; ".join(offenders)
+
+
+def test_no_module_shells_out_instead_of_importing():
+    """`test_the_only_external_process_is_claude` looks for an import of
+    `subprocess`. `os.system` needs no import at all, because `os` is already
+    imported nearly everywhere in this package."""
+    offenders = []
+    for path in source_files():
+        text = path.read_text(encoding="utf-8")
+        for call in ("os.system(", "os.popen(", "os.execv", "os.spawn"):
+            if call in text:
+                offenders.append(f"{path.relative_to(PACKAGE)}: {call}")
+    assert offenders == [], "; ".join(offenders)
+
+
 def test_the_cloud_voice_is_off_by_default():
     """Shipping it on would send replies out before anyone chose to."""
     from vesper.config import Config
@@ -128,8 +165,19 @@ def test_the_api_key_never_reaches_an_error_message():
     # Assembled rather than written out, so this fixture does not itself trip
     # the credential scan that runs over the tree in CI.
     secret = "sk" + "_" + "thisisnotarealkeyjustatestvalue00000000"
-    error = classify(401, b'{"detail":"nope"}')
-    assert secret not in str(error) and secret not in error.detail
+
+    # Feed the secret to classify() rather than a body that never contained
+    # it. The first version passed b'{"detail":"nope"}', so the assertion was
+    # unconditionally true: the string it looked for could not have been there
+    # whatever classify did. The branches that matter are 422 and the generic
+    # one, which do put the response body verbatim into `detail`, and some
+    # APIs echo request fields back in a validation error.
+    leaky_body = ('{"detail":"bad key ' + secret + '"}').encode()
+    for status in (401, 402, 403, 422, 429, 500, 418):
+        error = classify(status, leaky_body)
+        assert secret not in str(error), f"{status} leaked the key into str()"
+        assert secret not in error.detail, f"{status} leaked the key into detail"
+        assert secret not in error.reason
 
     client = ElevenClient(secret, base="http://127.0.0.1:9")
     try:
@@ -163,18 +211,35 @@ def test_microphone_audio_has_no_path_to_the_network():
     # Compared as names because `from __future__ import annotations` makes
     # every annotation in that module a string at runtime, the same thing
     # `config._coerce` has a comment about.
-    allowed = {"str", ""}
-    for name in ("stream_pcm", "design", "keep"):
+    # Every method that leaves the machine, discovered rather than listed.
+    # The first version named three methods by hand, so a new one was invisible
+    # until somebody remembered to add it here.
+    outbound = [
+        name for name in dir(eleven_api.ElevenClient)
+        if not name.startswith("_")
+        and callable(getattr(eleven_api.ElevenClient, name, None))
+    ]
+    assert {"stream_pcm", "design", "keep"} <= set(outbound)
+
+    for name in outbound:
         method = getattr(eleven_api.ElevenClient, name)
-        for parameter in inspect.signature(method).parameters.values():
+        try:
+            parameters = inspect.signature(method).parameters.values()
+        except (TypeError, ValueError):
+            continue
+        for parameter in parameters:
             if parameter.name == "self":
                 continue
-            annotation = parameter.annotation
-            if annotation is inspect.Parameter.empty:
-                annotation = ""
-            assert str(annotation) in allowed, (
+            # An unannotated parameter used to pass, because "" was allowed.
+            # That is the whole bypass: add `def stream_pcm(self, text: str,
+            # mic_samples, ...)` with no hint and the guard said nothing.
+            assert parameter.annotation is not inspect.Parameter.empty, (
+                f"ElevenClient.{name} takes {parameter.name} with no type. "
+                f"Annotate it, so this guard can see what it is."
+            )
+            assert str(parameter.annotation) == "str", (
                 f"ElevenClient.{name} takes {parameter.name}: "
-                f"{annotation}, which is not text"
+                f"{parameter.annotation}, which is not text"
             )
 
 

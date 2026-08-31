@@ -306,6 +306,9 @@ def test_find_voice_returns_none_when_empty(tmp_path):
 
 
 def test_missing_model_file_raises_clearly(tmp_path):
+    """piper lives in requirements-tts.txt, kept separate on purpose so a wheel
+    failure cannot block the core install. So it can legitimately be absent."""
+    pytest.importorskip("piper", reason="piper-tts not installed")
     with pytest.raises(FileNotFoundError):
         PiperTTS(tmp_path / "nope.onnx")
 
@@ -366,6 +369,18 @@ def test_piper_is_selected_when_the_model_is_present():
 
 
 def test_self_check_passes_on_this_machine(capsys):
+    """Deliberately an integration test against the real machine.
+
+    It spends a fraction of a cent proving the consent gate still refuses,
+    which is worth more than any mock. It needs the claude CLI, so on a build
+    agent it reports what is missing and skips rather than failing: a red
+    build for "this runner has no Claude installed" teaches nobody anything.
+    """
+    import shutil
+
+    if shutil.which("claude") is None:
+        pytest.skip("the claude CLI is not on PATH")
+
     assert main_module.check(config_module.Config()) == 0
     output = capsys.readouterr().out
     assert "claude cli" in output
@@ -373,6 +388,15 @@ def test_self_check_passes_on_this_machine(capsys):
 
 
 def test_devices_flag_lists_microphones(capsys):
+    """Needs a microphone, which a build agent does not have."""
+    try:
+        import sounddevice as sd
+
+        if not any(d["max_input_channels"] > 0 for d in sd.query_devices()):
+            pytest.skip("no input device on this machine")
+    except Exception:
+        pytest.skip("no audio subsystem on this machine")
+
     assert main_module.main(["--devices"]) == 0
     assert "input devices" in capsys.readouterr().out
 

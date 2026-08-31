@@ -31,6 +31,7 @@ carrying a short reason, and the caller falls back to Piper.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 BASE = "https://api.elevenlabs.io/v1"
@@ -112,11 +113,24 @@ class ElevenError(Exception):
         self.detail = detail
 
 
+# A key that came back in a response body is still a key. Validation errors in
+# particular echo request fields, and `detail` reaches var/vesper.log through
+# `str(exc)` wherever a failure is reported. Found by a review: the test that
+# claimed to cover this fed classify() a body that never contained a key, so
+# the assertion could not fail.
+_KEYLIKE = re.compile(r"\bsk[-_][A-Za-z0-9_-]{8,}")
+
+
+def redact(text: str) -> str:
+    """Strip anything key-shaped out of text that is about to be logged."""
+    return _KEYLIKE.sub("[redacted]", text or "")
+
+
 def classify(status: int, body: bytes) -> ElevenError:
     """Turn an HTTP failure into something the UI can say out loud."""
     text = ""
     try:
-        text = body.decode("utf-8", "replace")[:300]
+        text = redact(body.decode("utf-8", "replace"))[:300]
     except Exception:
         pass
     if status == 401:
