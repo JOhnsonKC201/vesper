@@ -377,6 +377,92 @@ the voice all run for real.
 
 ---
 
+## Speech out, when it is not local
+
+`tts/base.py` defines a three member protocol: `name`, `speak(text, stop)`,
+`close()`. Backends own their own playback rather than returning samples,
+because SAPI speaks through COM and never hands you a buffer, and "make this
+audible, and stop the moment you are told" is the honest contract.
+
+`ElevenTTS` is not a fourth backend alongside piper, sapi and none. It is a
+router holding a `PiperTTS` as a member:
+
+```
+speak(text, stop):
+    cache hit                      -> play from disk, free, works offline
+    no key, no budget, any failure -> self.fallback.speak(text, stop)
+    otherwise                      -> stream, play, cache, count
+```
+
+Two reasons for that shape, and the second is the important one.
+
+`Speaker.voice` is read inside the worker thread. Swapping it to change voice
+mid-utterance would mean coordinating a handover and calling `close()` on a
+backend that is currently speaking. Here, changing voice assigns a string that
+`speak` reads once at the top, and the worst case is that a sentence already in
+flight finishes in the old voice, which is correct anyway.
+
+More importantly, the local commands must survive an outage. Mute, undo and
+shutdown are handled without touching Claude precisely so they work with the
+network down. If they went through a cloud voice with no local fallback, an
+outage would take away the ability to shut the assistant up.
+
+### The cache is not an optimisation
+
+Seventeen lines are hardcoded into the assistant: the fillers, "Yes?", "Doing
+it.", "Shutting down.". They cost about 350 characters to synthesize once.
+
+The money matters on a 10,000 character monthly allowance, but the latency
+matters more. A cached line plays with no round trip, so the holding phrase
+covering a tool call, the most latency-sensitive line in the system, becomes
+the fastest rather than the slowest. Measured: 519ms cold, 0ms cached,
+identical audio.
+
+### What the free tier actually refuses
+
+Measured against a real key, because none of this is in the docs and the free
+tier behaves like a different product wearing the same API:
+
+| | |
+|---|---|
+| `pcm_22050` | works, which is why there is no audio decoder in this project |
+| Library voices | 402, all of them |
+| Aria and Charlotte | 402, despite being listed as premade |
+| The other 18 premade voices | work |
+| Creating a voice | 403, whatever permissions the key carries |
+| Listing voices | 401, so the voice list is a measured constant |
+
+---
+
+## Lessons
+
+`session.json` carries the conversation id across restarts, but a conversation
+gets compacted and eventually dropped, and "stop reading me file paths" should
+outlive that. So an instruction given out loud is written to `var/lessons.json`
+and put into the system prompt at the start of every future session.
+
+It is not machine learning, and `learning.py` says so in its first paragraph.
+Nothing trains. The value is entirely in two rules.
+
+**A correction has to be repeated.** "Remember that", "from now on", "always",
+"never" and "don't" count immediately. "No, I meant..." is stored but kept out
+of the prompt until it has happened twice, because a single "no" in a noisy
+transcript must not become a permanent rule.
+
+**The negation has to survive.** "Don't read me file paths" captures as "read
+me file paths" if you strip the trigger and stop thinking, and the stored rule
+then causes the exact behaviour that was complained about, forever, with
+nothing about the stored line looking wrong. The prefix is per pattern rather
+than one shared "do not", because "stop reading" has to stay "stop reading".
+
+The costs are asymmetric: a missed lesson means saying it again, a wrong one
+changes behaviour on every turn in a way that is very hard to trace back. That
+asymmetry is why the length bounds, the question check and the repetition
+threshold exist, and why most of `test_learning.py` is about what must *not* be
+learned.
+
+---
+
 ## Things deliberately not done
 
 **No overlay window.** A subagent traced pixelpets as a possible host and the
