@@ -345,7 +345,19 @@ def test_missing_piper_model_falls_back_to_sapi(tmp_path):
 
 
 def test_piper_is_selected_when_the_model_is_present():
+    """The name says "when the model is present", but nothing checked that.
+
+    The model is a 63MB download living under the gitignored `var/`, so on any
+    machine that has not run `python -m piper.download_voices` this failed
+    rather than skipping. That is a broken test, not a caught bug, and it is
+    what would have made the first CI run red.
+    """
     cfg = config_module.Config()
+    from vesper.tts.piper_voice import PiperTTS
+
+    if PiperTTS.find_voice(cfg.voices_path(), cfg.voice.model) is None:
+        pytest.skip("no piper voice downloaded; run python -m piper.download_voices")
+
     voice, label = main_module.build_voice(
         cfg, TerminalUI(console=Console(file=io.StringIO()))
     )

@@ -1,0 +1,72 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to a branch makes the first run pointless, and these runs are
+# not cheap: the dependency install pulls torch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Windows, not because it is convenient but because this is a Windows
+    # application. SAPI, pywin32, the tray icon and the autostart shortcut have
+    # no meaning anywhere else, and a green Linux run would be testing a
+    # different program.
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Config exists
+        # load() seeds config.yaml from the packaged default on first run. Doing
+        # it here rather than in a fixture means a broken default fails the
+        # build, which is the point: it is the file every new install gets.
+        run: python -c "from vesper import config; c = config.load(); print(c.identity.name, c.voice.engine, c.voice.eleven.model_id)"
+
+      - name: Tests
+        # No model files and no microphone on a runner, so the tests that need
+        # them skip. Everything that matters here is logic: the consent gate,
+        # the privacy guards, the fallbacks and the learning rules.
+        run: python -m pytest -q --timeout=120
+
+      - name: The privacy guards specifically
+        # Run again on their own so a failure here is unmissable in the log.
+        # These are the tests that fail if someone adds a network call, leaks
+        # the API key into a log, or opens a socket.
+        run: python -m pytest -q tests/test_privacy.py -v
+
+      - name: No secret reached the tree
+        shell: bash
+        run: |
+          # config.yaml is gitignored, but the packaged default is not, and it
+          # is the one file a careless copy-paste would put a key into.
+          #
+          # This directory is excluded because the pattern below matches itself,
+          # which is the one false positive that cannot be written around.
+          if grep -rEn 'sk_[A-Za-z0-9]{20,}|sk-ant-|gh[pous]_[A-Za-z0-9]{30,}' \
+              --include='*.py' --include='*.yaml' --include='*.yml' --include='*.md' \
+              --exclude-dir='.github' --exclude-dir='.venv' .; then
+            echo "::error::a credential-shaped string is in the tree"
+            exit 1
+          fi
+          echo "clean"
