@@ -200,6 +200,12 @@ class Conversation:
 
         self._running = threading.Event()
         self._spoken_recently: collections.deque[str] = collections.deque(maxlen=6)
+        # What was actually said, both sides, for the dashboard to show.
+        # Separate from `status()` because that is held to scalars by two
+        # tests, and rightly: it is read across a thread boundary once a
+        # second and a mutable value in it would be a race waiting to
+        # happen. `transcript()` hands back a fresh immutable copy instead.
+        self._transcript: collections.deque[tuple[str, str]] = collections.deque(maxlen=40)
         self._speaking_since = 0.0
         self._barge_run = 0
         self.turns = 0
@@ -276,6 +282,15 @@ class Conversation:
         self.mic.stop()
         self.speaker.close()
         self.brain.stop()
+
+    def transcript(self) -> tuple[tuple[str, str], ...]:
+        """The conversation so far, oldest first, as ("you"|"vasper", text).
+
+        A fresh tuple every call, not the deque. The dashboard thread reads
+        this while the audio loop is appending to it, and handing out the live
+        object would be handing out a race.
+        """
+        return tuple(self._transcript)
 
     def status(self) -> dict:
         """What it has been doing, as plain data.
@@ -527,6 +542,10 @@ class Conversation:
         self.ui.heard(transcript.text, addressed=result.triggered)
         if result.triggered:
             self._last_heard = transcript.text[:80]
+            # Only what was addressed to it. Everything said in the room goes
+            # past the microphone, and a transcript of the room is a different
+            # and much more intrusive thing than a record of the conversation.
+            self._transcript.append(("you", transcript.text))
         if not result.triggered:
             # Not addressed to Vesper, so a pending question stays pending and
             # unanswered. Both halves matter: a "yes" said to someone else in
@@ -667,6 +686,7 @@ class Conversation:
         if not line:
             return
         self._spoken_recently.append(line)
+        self._transcript.append(("vasper", line))
         if not self.speaker.speaking:
             self._speaking_since = time.monotonic()
         self.speaker.say(line)
@@ -991,6 +1011,7 @@ class Conversation:
         # Typed, so it came from someone with the keyboard. That is a stronger
         # identity check than any voiceprint.
         self._voice_confirmed = True
+        self._transcript.append(("you", text))
         if self._consent_is_live():
             if self._settle_consent(text, echo=False):
                 return

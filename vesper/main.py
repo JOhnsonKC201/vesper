@@ -342,6 +342,10 @@ def _start_tray(cfg: config_module.Config, conversation, ui):
         on_open_log=open_log,
         on_quit=conversation.shutdown,
         voices=panel,
+        # A second accessor rather than a field on `status`, which two tests
+        # hold to scalars. Both are read from the dashboard thread and both
+        # hand back a fresh immutable copy.
+        transcript=conversation.transcript,
     )
 
     tray = TrayIcon(

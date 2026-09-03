@@ -233,10 +233,15 @@ def cmd_focus(args) -> int:
         if win32gui.IsIconic(window.handle):
             win32gui.ShowWindow(window.handle, win32con.SW_RESTORE)
         win32gui.SetForegroundWindow(window.handle)
-    except Exception as exc:
+    except Exception:
         # Windows refuses foreground changes from a process that does not own
-        # the current foreground window. Say so rather than claiming success.
-        print(f"could not focus {_safe_title(window.title)!r}: {exc}")
+        # the current foreground window, and reports it as errno 2, "the system
+        # cannot find the file specified", which is nonsense and would be
+        # repeated to the user as though the window had vanished. Say what
+        # actually happened instead.
+        print(f"windows would not bring {_safe_title(window.title)!r} to the "
+              "front from the background. it is still open, and clicking it "
+              "once will do it.")
         return 1
     print(f"focused {_safe_title(window.title)}")
     return 0
@@ -324,6 +329,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _match_the_real_pixels() -> None:
+    """Tell Windows this process counts pixels the way the screen does.
+
+    Measured here: this display runs at 150%. A DPI unaware process is told a
+    window is at (234, 234) 392 wide, while it is really at (351, 351) and 588
+    wide, because Windows hands out logical coordinates and quietly scales.
+    mss grabs physical pixels. So `screenshot --window` was capturing a region
+    a third too small, offset up and to the left, and returning a picture of
+    whatever happened to be there instead: usually the window behind.
+
+    Deliberately called from `main` rather than at import. This runs as its own
+    short lived process through the shim, so the setting dies with it. Making
+    the assistant itself DPI aware would change nothing about what it hears and
+    would render the tkinter dashboard at a third of its intended size.
+    """
+    import ctypes
+
+    for attempt in (
+        # Per monitor v2, the only one that is right on a mixed DPI desktop.
+        lambda: ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)),
+        lambda: ctypes.windll.shcore.SetProcessDpiAwareness(2),
+        lambda: ctypes.windll.user32.SetProcessDPIAware(),
+    ):
+        try:
+            if attempt():
+                return
+        except Exception:
+            continue
+
+
 def _force_utf8() -> None:
     """Window titles are full of unicode and Windows still defaults to cp1252.
 
@@ -341,6 +376,7 @@ def _force_utf8() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _match_the_real_pixels()
     _force_utf8()
     args = build_parser().parse_args(argv)
     try:

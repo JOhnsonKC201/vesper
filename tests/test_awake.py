@@ -369,27 +369,139 @@ class Field:
         self.fg = kwargs.get("fg", self.fg)
 
 
-def _dashboard(data):
+class Frame:
+    """Enough of a tk.Frame for the pending banner, which packs and unpacks."""
+
+    def __init__(self):
+        self.mapped = False
+        self.before = None
+
+    def winfo_ismapped(self):
+        return self.mapped
+
+    def pack(self, **kwargs):
+        self.mapped = True
+        self.before = kwargs.get("before")
+
+    def pack_forget(self):
+        self.mapped = False
+
+
+class Log:
+    """Enough of a tk.Text to record what would have been written."""
+
+    def __init__(self):
+        self.lines: list[tuple[str, str]] = []
+        self.state = "disabled"
+
+    def configure(self, **kwargs):
+        self.state = kwargs.get("state", self.state)
+
+    def insert(self, _where, text, tag=""):
+        assert self.state == "normal", "a read only widget was written to"
+        self.lines.append((tag, text))
+
+    def delete(self, *_args):
+        self.lines.clear()
+
+    def see(self, _where):
+        pass
+
+
+def _dashboard(data, transcript=None):
     from vesper.ui import dashboard as dashboard_module
 
-    board = dashboard_module.Dashboard(lambda: data)
-    for name in ("state", "pause", "uptime", "detail"):
+    board = dashboard_module.Dashboard(lambda: data, transcript=transcript)
+    for name in ("state", "dot", "pause", "uptime", "hint", "ask",
+                 "summary", "care", "after_ask"):
         board._fields[name] = Field()
+    board._fields["ask_frame"] = Frame()
+    board._fields["log"] = Log()
     board._apply(data)
-    return board._fields["state"], dashboard_module
+    return board, dashboard_module
 
 
-def test_the_dashboard_shows_three_states_not_two():
+def test_the_dashboard_names_four_states_not_three():
+    """"waiting on you" was folded into "awake", which is the one state that
+    needs something from you and so the one worth telling apart."""
     asleep, module = _dashboard({"paused": False, "awake": False})
-    awake, _ = _dashboard({"paused": False, "awake": True})
-    paused, _ = _dashboard({"paused": True, "awake": True})
+    listening, _ = _dashboard({"paused": False, "awake": True})
+    waiting, _ = _dashboard({"paused": False, "awake": True, "pending": "edit notes"})
+    paused, _ = _dashboard({"paused": True, "awake": True, "pending": "edit notes"})
 
-    assert (asleep.text, awake.text, paused.text) == ("asleep", "awake", "paused")
-    # Asleep is the resting state and keeps the warm star. Awake gets the cool
-    # one, the same colour the tray uses, so the two surfaces agree.
-    assert asleep.fg == module.STAR
-    assert awake.fg == module.COOL
-    assert paused.fg == module.MUTED, "paused must win over awake"
+    assert asleep._fields["state"].text == "asleep"
+    assert listening._fields["state"].text == "listening"
+    assert waiting._fields["state"].text == "waiting on you"
+    assert paused._fields["state"].text == "paused", "paused wins over everything"
+
+    assert asleep._fields["state"].fg == module.STAR
+    assert listening._fields["state"].fg == module.COOL
+    assert waiting._fields["state"].fg == module.WARN
+    assert paused._fields["state"].fg == module.MUTED
+    # The dot and the word are the same colour, so it reads from a distance.
+    assert asleep._fields["dot"].fg == asleep._fields["state"].fg
+
+
+def test_every_state_says_what_to_do_about_it():
+    """A state nobody knows how to act on is decoration."""
+    for data in ({"awake": False}, {"awake": True},
+                 {"awake": True, "pending": "x"}, {"paused": True}):
+        board, _ = _dashboard(data)
+        assert board._fields["hint"].text.strip(), data
+
+
+def test_the_question_appears_only_while_one_is_pending():
+    quiet, _ = _dashboard({"awake": True})
+    assert quiet._fields["ask_frame"].mapped is False
+
+    asking, _ = _dashboard({"awake": True, "pending": "edit notes dot txt"})
+    assert asking._fields["ask_frame"].mapped is True
+    assert "edit notes dot txt" in asking._fields["ask"].text
+    # Packed before the conversation, not appended. Without an anchor it lands
+    # underneath the Quit button, which is the last place you would look for
+    # the question you are being asked.
+    assert asking._fields["ask_frame"].before is asking._fields["after_ask"]
+
+
+def test_the_conversation_is_shown_and_only_appended_to():
+    """Redrawing it every tick would fight anyone scrolled back through it."""
+    history = [("you", "what is my battery"), ("vasper", "Full, and on mains.")]
+    board, _ = _dashboard({"awake": True}, transcript=lambda: tuple(history))
+    written = "".join(text for _tag, text in board._fields["log"].lines)
+    assert "what is my battery" in written
+    assert "Full, and on mains." in written
+
+    history.append(("you", "open chrome"))
+    board._fields["log"].lines.clear()
+    board._apply({"awake": True})
+    written = "".join(text for _tag, text in board._fields["log"].lines)
+    assert written.strip().endswith("open chrome"), "only the new line redrawn"
+
+
+def test_a_restart_clears_the_stale_conversation():
+    history = [("you", "one"), ("vasper", "two"), ("you", "three")]
+    board, _ = _dashboard({"awake": True}, transcript=lambda: tuple(history))
+    history.clear()
+    history.append(("you", "fresh"))
+    board._apply({"awake": True})
+    written = "".join(text for _tag, text in board._fields["log"].lines)
+    assert "fresh" in written and "three" not in written
+
+
+def test_an_unasked_change_is_the_one_number_that_shouts():
+    """It should always be zero, so it is the only counter that changes colour."""
+    calm, module = _dashboard({"approvals": 2, "refusals": 1})
+    assert calm._fields["care"].fg == module.GOOD
+    assert "NOT ASKED" not in calm._fields["care"].text
+
+    loud, _ = _dashboard({"approvals": 1, "unasked": 2})
+    assert loud._fields["care"].fg == module.WARN
+    assert "NOT ASKED ABOUT" in loud._fields["care"].text
+
+
+def test_a_clean_session_says_so_in_words():
+    board, _ = _dashboard({"turns": 3})
+    assert board._fields["care"].text == "nothing on your machine has been changed"
 
 
 def test_the_tray_star_changes_colour_for_awake():

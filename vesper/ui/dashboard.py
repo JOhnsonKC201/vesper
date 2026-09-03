@@ -28,13 +28,20 @@ COOL = "#7edce2"
 TEXT = "#e8eaf2"
 MUTED = "#8b91ad"
 WARN = "#f0a868"
+THEM = "#9fb4ff"   # what you said
+MINE = "#e8eaf2"   # what it said
+GOOD = "#8fd8a8"
+
+# Spelled out so no layer of quoting can eat it.
+NEWLINE = chr(10)
 
 
 class Dashboard:
     """A live status window, opened and closed from the tray."""
 
     def __init__(self, snapshot, *, on_toggle=None, on_open_log=None,
-                 on_quit=None, voices=None, name: str = "Vesper") -> None:
+                 on_quit=None, voices=None, name: str = "Vasper",
+                 transcript=None) -> None:
         # A callable returning a plain dict. Deliberately not the Conversation
         # itself: this thread must never touch the audio loop's state directly.
         self.snapshot = snapshot
@@ -48,6 +55,13 @@ class Dashboard:
         # renders `snapshot`.
         self.voices = voices
         self.name = name
+        # A callable returning a tuple of ("you"|"vasper", text). Optional, so
+        # a dashboard can still be built without a conversation behind it.
+        self.transcript = transcript
+        # How many lines have been drawn, so a refresh appends the new ones
+        # rather than rebuilding the whole widget and throwing away the
+        # scrollback the reader may be part way through.
+        self._drawn = 0
 
         self._thread: threading.Thread | None = None
         self._root = None
@@ -179,45 +193,99 @@ class Dashboard:
         return str(ROOT / "var" / "icons" / "vesper-listening.ico")
 
     def _build(self, tk, root) -> None:
-        pad = {"padx": 18}
+        """The layout, top to bottom in order of how much it matters.
 
-        # Header: the one thing worth seeing from across the room.
+        What it is doing now, then anything waiting on you, then what was
+        actually said, then the numbers. The old version led with three grids
+        of counters, which answered questions nobody had while burying the
+        conversation entirely.
+        """
+        pad = {"padx": 18}
+        root.configure(bg=NIGHT)
+
+        # --- state: the one thing worth reading from across the room --------
         header = tk.Frame(root, bg=NIGHT)
-        header.pack(fill="x", pady=(16, 4), **pad)
+        header.pack(fill="x", pady=(16, 2), **pad)
+        self._fields["dot"] = tk.Label(
+            header, text="●", font=("Segoe UI", 15), bg=NIGHT, fg=STAR)
+        self._fields["dot"].pack(side="left", padx=(0, 8))
         self._fields["state"] = tk.Label(
-            header, text="listening", font=("Segoe UI", 17, "bold"),
+            header, text="starting", font=("Segoe UI", 17, "bold"),
             bg=NIGHT, fg=STAR, anchor="w")
         self._fields["state"].pack(side="left")
         self._fields["uptime"] = tk.Label(
-            header, text="", font=("Segoe UI", 10), bg=NIGHT, fg=MUTED, anchor="e")
-        self._fields["uptime"].pack(side="right", pady=(8, 0))
+            header, text="", font=("Segoe UI", 9), bg=NIGHT, fg=MUTED, anchor="e")
+        self._fields["uptime"].pack(side="right", pady=(9, 0))
 
-        self._fields["detail"] = tk.Label(
-            root, text="", font=("Segoe UI", 9), bg=NIGHT, fg=MUTED,
-            anchor="w", justify="left", wraplength=340)
-        self._fields["detail"].pack(fill="x", pady=(0, 12), **pad)
+        self._fields["hint"] = tk.Label(
+            root, text="", font=("Segoe UI", 9), bg=NIGHT, fg=MUTED, anchor="w")
+        self._fields["hint"].pack(fill="x", pady=(0, 10), **pad)
 
-        # Numbers, in a monospace so they stop jittering as they change.
-        self._counters(tk, root, "this session", [
-            ("turns", "turns"), ("cost", "cost"), ("interruptions", "cut off"),
-        ])
-        self._counters(tk, root, "changes to your machine", [
-            ("approvals", "approved"), ("refusals", "refused"),
-            ("undos", "undone"),
-        ])
-        self._counters(tk, root, "who it heard", [
-            ("voice_rejections", "not you"), ("echo_rejections", "itself"),
-        ])
+        # --- anything waiting on you, which outranks everything below -------
+        ask = tk.Frame(root, bg=PANEL)
+        self._fields["ask_frame"] = ask
+        self._fields["ask"] = tk.Label(
+            ask, text="", font=("Segoe UI", 10, "bold"), bg=PANEL, fg=WARN,
+            anchor="w", justify="left", wraplength=330)
+        self._fields["ask"].pack(fill="x", padx=12, pady=(9, 1))
+        tk.Label(ask, text='say "Vasper, yes" to allow it, or "no" to leave it',
+                 font=("Segoe UI", 8), bg=PANEL, fg=MUTED, anchor="w").pack(
+            fill="x", padx=12, pady=(0, 9))
+
+        # --- what was actually said -----------------------------------------
+        heading = tk.Label(root, text="CONVERSATION", font=("Segoe UI", 7, "bold"),
+                           bg=NIGHT, fg=MUTED, anchor="w")
+        heading.pack(fill="x", **pad)
+        # Kept so the pending banner can be packed *before* it. Without the
+        # anchor, re-packing appends to the end of the order and the question
+        # you are being asked appears below the Quit button.
+        self._fields["after_ask"] = heading
+        wrap = tk.Frame(root, bg=PANEL)
+        wrap.pack(fill="both", expand=True, pady=(4, 12), **pad)
+        log = tk.Text(
+            wrap, height=13, width=44, bg=PANEL, fg=MINE, bd=0,
+            font=("Segoe UI", 9), wrap="word", relief="flat",
+            padx=10, pady=8, highlightthickness=0, cursor="arrow")
+        bar = tk.Scrollbar(wrap, command=log.yview, width=10,
+                           bg=PANEL, troughcolor=PANEL, bd=0,
+                           highlightthickness=0, activebackground=LINE)
+        log.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        log.pack(side="left", fill="both", expand=True)
+        log.tag_configure("you", foreground=THEM, spacing1=5)
+        log.tag_configure("vasper", foreground=MINE, spacing3=3)
+        log.tag_configure("empty", foreground=MUTED)
+        # Read only, but still selectable so a line can be copied out. Disabled
+        # would prevent that, so the state is flipped only around writes.
+        log.configure(state="disabled")
+        self._fields["log"] = log
+
+        # --- the numbers, as one sentence rather than three grids ------------
+        self._fields["summary"] = tk.Label(
+            root, text="", font=("Consolas", 9), bg=NIGHT, fg=MUTED, anchor="w")
+        self._fields["summary"].pack(fill="x", **pad)
+        self._fields["care"] = tk.Label(
+            root, text="", font=("Consolas", 9), bg=NIGHT, fg=MUTED, anchor="w")
+        self._fields["care"].pack(fill="x", pady=(2, 0), **pad)
 
         if self.voices is not None:
             self._voice_section(tk, root)
 
-        tk.Frame(root, bg=LINE, height=1).pack(fill="x", pady=(14, 0), **pad)
+        tk.Frame(root, bg=LINE, height=1).pack(fill="x", pady=(12, 0), **pad)
+
+        self._fields["say"] = tk.Label(
+            root, font=("Segoe UI", 8), bg=NIGHT, fg=MUTED, anchor="w",
+            justify="left", wraplength=340,
+            text=" ".join((
+                'try  "Vasper, what am I looking at"  ·  "open chrome"',
+                '·  "look at my screen".  anytime:  "go to sleep"',
+                '·  "be quiet"  ·  "undo that"',
+            )))
+        self._fields["say"].pack(fill="x", pady=(10, 0), **pad)
 
         buttons = tk.Frame(root, bg=NIGHT)
         buttons.pack(fill="x", pady=14, **pad)
-        self._fields["pause"] = self._button(
-            tk, buttons, "Pause", lambda: self._toggle())
+        self._fields["pause"] = self._button(tk, buttons, "Pause", lambda: self._toggle())
         self._fields["pause"].pack(side="left")
         self._button(tk, buttons, "Open log", self._on_open_log).pack(side="left", padx=8)
         self._button(tk, buttons, "Quit", self._quit, danger=True).pack(side="right")
@@ -378,40 +446,134 @@ class Dashboard:
             pass
 
     def _apply(self, data: dict) -> None:
-        paused = bool(data.get("paused"))
-        # Three states, not two. Asleep is the resting one and keeps the warm
-        # star; awake means the follow-up window is open and plain speech is
-        # being acted on, which is the one worth noticing from across the room.
-        if paused:
-            label, colour = "paused", MUTED
+        self._apply_state(data)
+        self._apply_ask(data)
+        self._apply_transcript()
+        self._apply_numbers(data)
+        if self.voices is not None:
+            self._apply_voice()
+
+    def _apply_state(self, data: dict) -> None:
+        """What it is doing, in words a person would use.
+
+        Four states, not the old three. "waiting" is split out because it is
+        the only one that needs something from you, and reading "awake" while
+        a question sits unanswered told you nothing about that.
+        """
+        if data.get("paused"):
+            label, colour, hint = "paused", MUTED, "not listening. press Resume."
+        elif data.get("pending"):
+            label, colour, hint = "waiting on you", WARN, "there is a question below."
         elif data.get("awake"):
-            label, colour = "awake", COOL
+            label, colour, hint = "listening", COOL, "just talk, no need to say the name."
         else:
-            label, colour = "asleep", STAR
-        state = self._fields["state"]
-        state.config(text=label, fg=colour)
-        self._fields["pause"].config(text="Resume" if paused else "Pause")
+            label, colour, hint = "asleep", STAR, 'say "Vasper" to wake him.'
+
+        self._fields["state"].config(text=label, fg=colour)
+        self._fields["dot"].config(fg=colour)
+        self._fields["hint"].config(text=hint)
+        self._fields["pause"].config(text="Resume" if data.get("paused") else "Pause")
 
         seconds = int(data.get("uptime_s") or 0)
         self._fields["uptime"].config(text=f"up {timedelta(seconds=seconds)}")
 
-        detail = data.get("last_heard") or ""
-        self._fields["detail"].config(
-            text=f"last heard  {detail}" if detail
-            else "nothing heard yet, say the wake word")
+    def _apply_ask(self, data: dict) -> None:
+        """The pending question, shown only while there is one.
 
-        for key in ("turns", "interruptions", "approvals", "refusals",
-                    "undos", "voice_rejections", "echo_rejections"):
-            widget = self._fields.get(key)
-            if widget is not None:
-                widget.config(text=str(data.get(key, 0)))
+        Packed and unpacked rather than blanked, so the space it takes is not
+        held open by an empty box for the whole session.
+        """
+        pending = str(data.get("pending") or "")
+        frame = self._fields["ask_frame"]
+        if pending:
+            self._fields["ask"].config(text=f"Shall I {pending}?")
+            if not frame.winfo_ismapped():
+                anchor = self._fields.get("after_ask")
+                if anchor is not None:
+                    frame.pack(fill="x", padx=18, pady=(0, 12), before=anchor)
+                else:
+                    frame.pack(fill="x", padx=18, pady=(0, 12))
+        elif frame.winfo_ismapped():
+            frame.pack_forget()
 
-        cost = self._fields.get("cost")
-        if cost is not None:
-            cost.config(text=f"${float(data.get('cost_usd') or 0.0):.2f}")
+    def _apply_transcript(self) -> None:
+        """Append what is new. Never redraw what is already there.
 
-        if self.voices is not None:
-            self._apply_voice()
+        Rebuilding the widget each tick would fight anyone scrolled back
+        through it, and reset the selection they were about to copy.
+        """
+        if self.transcript is None:
+            return
+        try:
+            lines = self.transcript()
+        except Exception:
+            return
+
+        log = self._fields["log"]
+        # A shorter history than last time means the session restarted, so the
+        # widget is stale rather than merely behind.
+        if len(lines) < self._drawn:
+            self._drawn = 0
+            log.configure(state="normal")
+            log.delete("1.0", "end")
+            log.configure(state="disabled")
+
+        if not lines:
+            if self._drawn == 0:
+                self._write(log, "nothing said yet." + NEWLINE, "empty")
+                self._drawn = -1
+            return
+        if self._drawn < 0:
+            log.configure(state="normal")
+            log.delete("1.0", "end")
+            log.configure(state="disabled")
+            self._drawn = 0
+
+        for who, text in lines[self._drawn:]:
+            speaker = "you" if who == "you" else self.name.lower()
+            self._write(log, f"{speaker}   {text}" + NEWLINE, "you" if who == "you" else "vasper")
+        self._drawn = len(lines)
+        log.see("end")
+
+    @staticmethod
+    def _write(log, text: str, tag: str) -> None:
+        log.configure(state="normal")
+        log.insert("end", text, tag)
+        log.configure(state="disabled")
+
+    def _apply_numbers(self, data: dict) -> None:
+        """Two lines instead of three grids of counters.
+
+        The old panel showed seven numbers with no scale and no meaning. These
+        are the two questions a person actually has: how much have I used it,
+        and has it touched anything of mine.
+        """
+        turns = int(data.get("turns") or 0)
+        cost = float(data.get("cost_usd") or 0.0)
+        learned = int(data.get("learned") or 0)
+        summary = f"{turns} asked  ·  ${cost:.2f}"
+        if learned:
+            summary += f"  ·  {learned} thing{'s' if learned != 1 else ''} remembered"
+        self._fields["summary"].config(text=summary)
+
+        approvals = int(data.get("approvals") or 0)
+        refusals = int(data.get("refusals") or 0)
+        undos = int(data.get("undos") or 0)
+        unasked = int(data.get("unasked") or 0)
+        if not any((approvals, refusals, undos, unasked)):
+            care, colour = "nothing on your machine has been changed", MUTED
+        else:
+            bits = [f"{approvals} approved"]
+            if refusals:
+                bits.append(f"{refusals} refused")
+            if undos:
+                bits.append(f"{undos} undone")
+            care, colour = "  ·  ".join(bits), GOOD
+            if unasked:
+                # The one number that should always be zero.
+                care += f"   {unasked} NOT ASKED ABOUT"
+                colour = WARN
+        self._fields["care"].config(text=care, fg=colour)
 
     # --- actions ------------------------------------------------------------
 
