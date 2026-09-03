@@ -23,6 +23,7 @@ from pathlib import Path
 from . import autostart as autostart_module
 from . import config as config_module
 from . import desktop as desktop_module
+from . import resume as resume_module
 from . import single
 from .audio.mic import Microphone
 from .audio.speaker import Speaker
@@ -437,8 +438,13 @@ def say_on_screen(*lines: str, title: str = "Vesper") -> bool:
         return False
 
 
-def run_voice(cfg: config_module.Config) -> int:
+def run_voice(cfg: config_module.Config, *, if_idle: bool = False) -> int:
     if not single.claim():
+        if if_idle:
+            # The resume task fires on every unlock, and Vesper is usually
+            # already running by then. Saying so in a dialog box every time
+            # the lid opens would be worse than the thing it reports.
+            return 0
         # Two copies both hold the microphone, so every utterance is answered
         # and spoken twice, over each other, and both spend your subscription
         # window. With autostart on, a second copy is the expected accident
@@ -613,6 +619,7 @@ def check(cfg: config_module.Config, *, gate: bool = True) -> int:
     # reboot", which is the whole question once it runs from login.
     print(f"  --    autostart  {autostart_module.describe()}")
     print(f"  --    desktop icon  {desktop_module.describe()}")
+    print(f"  --    on wake  {resume_module.describe()}")
     from .stt.voiceprint import available as voice_model_ready
 
     print(f"  --    voice model  "
@@ -680,6 +687,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="take that icon off the desktop again")
     parser.add_argument("--uninstall-autostart", action="store_true",
                         help="stop starting with Windows")
+    parser.add_argument("--install-resume", action="store_true",
+                        help="also come back on unlock and wake, not just login")
+    parser.add_argument("--uninstall-resume", action="store_true",
+                        help="stop coming back on unlock and wake")
+    parser.add_argument("--if-idle", action="store_true",
+                        help="do nothing if Vesper is already running")
     parser.add_argument("--check", action="store_true", help="verify dependencies")
     parser.add_argument(
         "--offline",
@@ -715,6 +728,14 @@ def main(argv: list[str] | None = None) -> int:
         ok, detail = autostart_module.uninstall()
         print(f"autostart removed: {detail}" if ok else f"could not remove: {detail}")
         return 0 if ok else 1
+    if args.install_resume:
+        ok, detail = resume_module.install(config_module.ROOT)
+        print(f"resume installed: {detail}" if ok else f"could not install: {detail}")
+        return 0 if ok else 1
+    if args.uninstall_resume:
+        ok, detail = resume_module.uninstall()
+        print(f"resume removed: {detail}" if ok else f"could not remove: {detail}")
+        return 0 if ok else 1
     if args.enroll:
         from .enroll import run as run_enroll
 
@@ -725,7 +746,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_text(cfg, one_shot=args.say)
     if args.text:
         return run_text(cfg)
-    return run_voice(cfg)
+    return run_voice(cfg, if_idle=args.if_idle)
 
 
 if __name__ == "__main__":

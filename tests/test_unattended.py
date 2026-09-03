@@ -18,6 +18,9 @@ import numpy as np
 import pytest
 
 from vesper import autostart
+from vesper import main as main_module
+from vesper import resume
+from vesper import single
 from vesper.audio.speaker import Speaker
 from vesper.conversation import Conversation, ConversationConfig
 from vesper.logfile import LogFile, attach
@@ -196,6 +199,71 @@ def test_the_shortcut_lands_in_the_startup_folder(monkeypatch, tmp_path):
     expected = (tmp_path / "Microsoft" / "Windows" / "Start Menu" / "Programs"
                 / "Startup" / "Vesper.lnk")
     assert autostart.shortcut_path() == expected
+
+
+# --- coming back on wake ----------------------------------------------------
+
+
+def test_resume_task_refuses_to_point_at_a_launcher_that_is_missing(tmp_path):
+    """Same trap as the startup shortcut, one step further from anyone
+    watching: this one fires at unlock."""
+    ok, detail = resume.install(tmp_path / "empty")
+    assert not ok
+    assert "run_silent.vbs" in detail
+
+
+def test_the_task_runs_on_unlock_and_on_wake(tmp_path):
+    """Two triggers, not one. A lid that opens onto a lock screen sends
+    SessionUnlock; a resume that never locked sends neither, so the power
+    event has to be there too."""
+    (tmp_path / "run_silent.vbs").write_text("")
+    spec = resume.plan(tmp_path)
+    assert spec["triggers"] == ["session-unlock", "resume-from-sleep"]
+    assert "Microsoft-Windows-Power-Troubleshooter" in spec["resume_event"]
+
+
+def test_the_task_passes_if_idle_so_unlocking_cannot_stack_dialogs(tmp_path):
+    """Without this flag every unlock while Vesper is running puts a message
+    box on screen, because the second copy has no console to print into."""
+    (tmp_path / "run_silent.vbs").write_text("")
+    assert "--if-idle" in resume.plan(tmp_path)["arguments"]
+
+
+def test_the_task_still_starts_on_battery(tmp_path):
+    """Task Scheduler refuses to start on battery by default, which is exactly
+    when a laptop lid opens."""
+    (tmp_path / "run_silent.vbs").write_text("")
+    settings = resume.plan(tmp_path)["settings"]
+    assert settings["DisallowStartIfOnBatteries"] is False
+    assert settings["StopIfGoingOnBatteries"] is False
+
+
+def test_removing_a_resume_task_that_was_never_there_is_not_an_error(monkeypatch):
+    monkeypatch.setattr(resume, "is_installed", lambda: False)
+    ok, detail = resume.uninstall()
+    assert ok and "no resume task" in detail
+
+
+def test_if_idle_exits_quietly_when_another_vesper_holds_the_microphone(monkeypatch):
+    """The whole reason the flag exists. cfg is never reached: the guard
+    returns before anything looks at it."""
+    monkeypatch.setattr(single, "claim", lambda *a, **k: False)
+    shown = []
+    monkeypatch.setattr(main_module, "say_on_screen",
+                        lambda *a, **k: shown.append(a) or True)
+    assert main_module.run_voice(None, if_idle=True) == 0
+    assert shown == []
+
+
+def test_without_if_idle_a_second_copy_still_says_so(monkeypatch):
+    """The desktop icon depends on this: a double click that did nothing
+    visible would read as a broken program."""
+    monkeypatch.setattr(single, "claim", lambda *a, **k: False)
+    shown = []
+    monkeypatch.setattr(main_module, "say_on_screen",
+                        lambda *a, **k: shown.append(a) or True)
+    assert main_module.run_voice(None) == 1
+    assert shown
 
 
 # --- an icon on the desktop -------------------------------------------------
