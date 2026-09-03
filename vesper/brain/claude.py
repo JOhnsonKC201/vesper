@@ -50,6 +50,11 @@ def child_env() -> dict:
         if not name.upper().startswith(_PRIVATE_ENV_PREFIX)
     }
     env["PYTHONIOENCODING"] = "utf-8"
+    # `vasper` is Vasper's own hands (vesper/tool.py, via vasper.cmd). The brain
+    # runs with cwd set to the home directory, so without this the shim is not
+    # on any path it can reach and every call comes back "not recognized".
+    root = str(Path(__file__).resolve().parent.parent.parent)
+    env["PATH"] = os.pathsep.join([root, env.get("PATH", "")])
     return env
 
 # Windows: keep the child's console window from flashing on screen.

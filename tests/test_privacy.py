@@ -339,6 +339,10 @@ def test_sensors_read_locally_and_open_no_sockets(monkeypatch):
         "API_KEY setup - Notepad",
         "Barclays Banking",
         "LastPass Vault",
+        # Edge's word for incognito. It was missing, so an Edge private window
+        # was reported by its real title while Chrome's was hidden.
+        "InPrivate - Microsoft Edge",
+        "Mozilla Firefox Private Browsing",
     ],
 )
 def test_sensitive_window_titles_are_hidden(title):

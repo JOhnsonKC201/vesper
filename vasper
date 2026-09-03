@@ -1,0 +1,11 @@
+#!/bin/sh
+# Vasper's hands, for a POSIX shell. `vasper.cmd` is the same thing for cmd and
+# PowerShell. Both exist because the brain's shell is git-bash here, and bash
+# does not resolve a bare `vasper` to `vasper.cmd` the way cmd does.
+#
+# The cd is load bearing: the brain runs with cwd set to the home directory, and
+# `python -m vesper.tool` from there is "No module named vesper". Nothing this
+# tool takes is a relative path, so moving is free.
+here=$(cd "$(dirname "$0")" && pwd)
+cd "$here" || exit 1
+exec "./.venv/Scripts/python.exe" -m vesper.tool "$@"

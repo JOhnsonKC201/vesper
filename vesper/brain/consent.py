@@ -150,7 +150,10 @@ _INTERPRETERS = {
     "python", "python3", "py", "node", "deno", "bun", "perl", "ruby", "sh",
     "bash", "zsh", "powershell", "pwsh", "cmd", "wscript", "cscript",
 }
-_SUBCOMMAND_TOOLS = {"git", "npm", "pnpm", "yarn", "pip", "winget", "choco", "docker", "gh"}
+# `vasper` is here so a grant reads `Bash(vasper click:*)` rather than bare
+# `Bash(vasper:*)`. Approving a click must not also buy typing.
+_SUBCOMMAND_TOOLS = {"git", "npm", "pnpm", "yarn", "pip", "winget", "choco",
+                     "docker", "gh", "vasper"}
 # A verb carrying shell punctuation is a parse failure, not a verb. One such
 # produced the allowlist spec `Bash(y):*)` from a curl of a url ending in /y.
 _CLEAN_VERB = re.compile(r"^[A-Za-z0-9_.+-]+(?: [A-Za-z0-9_.+-]+)?$")

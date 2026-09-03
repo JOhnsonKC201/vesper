@@ -43,8 +43,18 @@ class BrainSettings:
     tools: tuple[str, ...] = (
         "Bash", "Read", "Write", "Edit", "Grep", "Glob", "WebSearch",
     )
-    # Everything Vesper may do without asking. The rule for this list is that no
-    # entry may be able to change anything.
+    # Everything Vasper may do without asking. The rule for this list was "no
+    # entry may be able to change anything", and it has been widened once,
+    # deliberately, rather than quietly broken.
+    #
+    # The rule now: nothing here may change data, reach the network, or run a
+    # program of its own choosing. Launching a Start Menu entry and changing
+    # which window has focus are allowed, because both are immediately visible,
+    # trivially reversible, and exactly what the user meant by "open Chrome".
+    # `vasper open` takes a Start Menu shortcut and passes it no arguments, so
+    # it can do no more than the user double clicking the same icon. Clicking
+    # and typing are NOT here, and must not be added: a click can press Send,
+    # and typing can write anything into anything.
     #
     # A review of this list found six more entries that could change things,
     # each of which meant an action nobody was ever asked about:
@@ -85,6 +95,13 @@ class BrainSettings:
         "Bash(df:*)",
         "Bash(tasklist:*)",
         "Bash(systeminfo:*)",
+        # Vasper's own hands. Looking, and the two changes that are only ever
+        # visible ones. See vesper/tool.py.
+        "Bash(vasper windows:*)",
+        "Bash(vasper apps:*)",
+        "Bash(vasper screenshot:*)",
+        "Bash(vasper focus:*)",
+        "Bash(vasper open:*)",
         "Bash(date:*)",
         "Bash(whoami:*)",
         "Bash(hostname:*)",

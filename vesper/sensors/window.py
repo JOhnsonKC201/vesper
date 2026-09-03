@@ -36,9 +36,14 @@ class ActiveWindow:
 
 # Titles matching these are reported as the app name only. Cheap protection
 # against the assistant reciting a password manager entry or a private chat.
+# `inprivate` is Edge's word for incognito and was missing, so an Edge private
+# window was reported by its real title while the Chrome equivalent was hidden.
+# That mattered more once `vasper windows` began listing every window rather
+# than only the focused one: the hole went from one window to all of them.
 _SENSITIVE = re.compile(
     r"(password|passwd|secret|token|api[_ -]?key|credential|bitwarden|1password"
-    r"|lastpass|keepass|banking|incognito|private browsing)",
+    r"|lastpass|keepass|banking|incognito|inprivate|private browsing"
+    r"|private window)",
     re.IGNORECASE,
 )
 
