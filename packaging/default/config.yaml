@@ -153,6 +153,29 @@ listening:
   # base.en is faster if it works for your voice; large-v3-turbo is better again
   # and slower still.
   whisper_model: small.en
+  # Where transcription runs. This used to be decided by asking torch whether
+  # it could see the gpu, which was the wrong question: faster-whisper runs on
+  # CTranslate2, not torch, and torch here is deliberately the cpu build. The
+  # answer was always no, on every machine, whatever card was in it.
+  #
+  # `auto` asks CTranslate2 and then proves it with one real inference before
+  # trusting it, because a card being present and the cuda runtime being
+  # installed are different things and the model builds happily either way.
+  # Anything that does not work falls back to the cpu and says so in the log.
+  #
+  # Measured here on an RTX 5060, small.en, four spoken questions of about
+  # three seconds each: 1516ms on the cpu against 130ms on the gpu, for
+  # identical transcripts. Transcription sits directly in front of the reply,
+  # so that is 1.4 seconds off every single thing you say.
+  #
+  # The gpu path needs two packages that are not installed by default because
+  # they are 1.3GB and most machines will not use them:
+  #     pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+  # Without them `auto` stays on the cpu exactly as before.
+  whisper_device: auto
+  # float16 on the gpu, int8 on the cpu. Override only if a card dislikes half
+  # precision, in which case int8_float16 is the next thing to try.
+  whisper_compute: auto
   wake_required: true
   # How long he stays awake. Say his name once and plain speech counts as
   # talking to him for this long, with the clock reset by every thing you say

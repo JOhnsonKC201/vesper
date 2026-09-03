@@ -49,7 +49,14 @@ from .brain.persona import (
     is_refusal_noise,
     split_channels,
 )
-from .brain.protocol import BrainError, PermissionNeeded, TextDelta, ToolStarted, TurnComplete
+from .brain.protocol import (
+    BrainError,
+    PermissionNeeded,
+    TextDelta,
+    ToolStarted,
+    TurnComplete,
+    tool_detail,
+)
 from .brain.sentences import SentenceAssembler
 from .sensors import snapshot as sensors
 from .stt import voiceprint
@@ -213,6 +220,11 @@ class Conversation:
         self.approvals = 0
         self.refusals = 0
         self.undos = 0
+        # Tool calls that rode in on an approval given for something else.
+        # Surfaced in `status`, where it should almost always be zero.
+        self.unasked = 0
+        # Blocks that raised and were survived rather than fatal.
+        self.errors = 0
         self.voice_rejections = 0
         self._paused = False
         self._started_at = time.monotonic()
@@ -274,6 +286,8 @@ class Conversation:
             "approvals": self.approvals,
             "refusals": self.refusals,
             "undos": self.undos,
+            "unasked": self.unasked,
+            "errors": self.errors,
             "voice_rejections": self.voice_rejections,
             "echo_rejections": self.echo_rejections,
             "last_heard": self._last_heard,
@@ -341,7 +355,26 @@ class Conversation:
                 block = self.mic.read(timeout=0.5)
                 if block is None:
                     continue
-                self._handle_block(block)
+                try:
+                    self._handle_block(block)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    # One bad block must not end the assistant. Everything
+                    # below this line runs for days from a login shortcut with
+                    # no console attached, so an exception escaping here is not
+                    # a traceback anybody reads: it is Vesper disappearing
+                    # mid sentence, and the next thing you notice is that it
+                    # stopped answering. Report it, drop the block, keep the
+                    # microphone open.
+                    self.errors += 1
+                    # `ui.error` rather than the log directly: `logfile.attach`
+                    # already tees every ui call into the file, so this lands
+                    # in both places and stays one call.
+                    self.ui.error(f"handling audio failed, {type(exc).__name__}: {exc}")
+                    # A half collected utterance is not worth carrying past an
+                    # error whose cause is unknown.
+                    self.endpointer.reset()
         except KeyboardInterrupt:
             pass
         finally:
@@ -739,12 +772,70 @@ class Conversation:
         self._say("Doing it.")
         self.brain.grant(request.grants())
         try:
-            self._run_turn(APPROVED_NOTE.format(action=request.written()))
+            self._run_turn(
+                APPROVED_NOTE.format(action=request.written()), granted=request
+            )
         finally:
             # Always, including after an error or an interruption. A grant that
             # outlives the action it was given for is the failure mode this
             # whole design exists to prevent.
             self.brain.revoke_soon()
+
+    @staticmethod
+    def _unasked_use(granted: ActionRequest | None, event) -> str | None:
+        """Is this tool call the one that was approved, or another one?
+
+        Returns a written description when a grant is being spent on something
+        the user was never asked about, and None otherwise.
+
+        This exists because the CLI will not scope a Write or an Edit to a
+        single path. A yes to "edit notes dot txt" installs `Edit`, and `Edit`
+        covers every file on the drive for as long as the grant is open. The
+        question now says so, but saying so is not the same as noticing, and a
+        gate that cannot be narrowed can at least be watched.
+        """
+        if granted is None:
+            return None
+        # Only grants the CLI could not scope. A yes to "run git commit" is
+        # granted as `Bash(git commit:*)`, so a second `git commit` is inside
+        # what was actually said out loud and flagging it would be noise. The
+        # file tools are the ones where the grant is wider than the sentence.
+        if not granted.whole_tool:
+            return None
+        # And only the tool the yes widened. Read, Grep and Glob run all day
+        # without asking anyone and are not what this is about.
+        if event.name not in {spec.split("(")[0] for spec in granted.grants()}:
+            return None
+        approved = tool_detail(granted.tool, granted.tool_input)
+        if event.detail and approved and event.detail.strip() == approved.strip():
+            return None
+        if not event.detail and not approved:
+            return None
+        return f"{event.name}: {(event.detail or '').strip()[:200]}"
+
+    def _report_unasked(self, extras: list[str]) -> None:
+        """Log, count and say out loud what the grant was also spent on.
+
+        Spoken, not merely logged. A line in a file nobody opens is how this
+        stays invisible, and the whole point of asking out loud is that the
+        answer is not buried.
+        """
+        self.unasked += len(extras)
+        for extra in extras:
+            self.ui.decision(audit.UNASKED, extra)
+            if self.config.audit_log is not None:
+                audit.record(self.config.audit_log, audit.UNASKED, extra)
+        # No promise about undo. `keep_copy` only holds the file the question
+        # named, and a copy taken now would be taken after the write rather
+        # than before it, so offering to put these back would mean restoring
+        # the changed contents while claiming to restore the original. That is
+        # the exact failure `undo.py` calls worse than having no undo at all.
+        if len(extras) == 1:
+            self._say("While I had that permission I also changed a file you "
+                      "didn't approve. It's in the actions log.")
+        else:
+            self._say(f"While I had that permission I also changed {len(extras)} "
+                      "files you didn't approve. They're in the actions log.")
 
     def _decline(self, request: ActionRequest) -> None:
         self.refusals += 1
@@ -891,9 +982,14 @@ class Conversation:
         self.turns += 1
         self._run_turn(frame_turn(text, sensors.context_block()))
 
-    def _run_turn(self, payload: str) -> None:
+    def _run_turn(self, payload: str, granted: ActionRequest | None = None) -> None:
         """Drive one turn end to end: speak it, then ask about anything it was
-        stopped from doing."""
+        stopped from doing.
+
+        `granted` is the request a spoken yes just widened the allowlist for,
+        and is set only on the turn that runs it. It is not used to permit
+        anything, only to notice what the widening is actually spent on.
+        """
         router = ChannelRouter()
         assembler = SentenceAssembler()
         started = time.monotonic()
@@ -905,6 +1001,10 @@ class Conversation:
 
         requests: list[ActionRequest] = []
         seen: set[str] = set()
+        # Tool calls that ran on this grant without being the thing it was
+        # given for. Collected rather than announced mid turn, because cutting
+        # across Claude to report one is how you end up hearing neither.
+        extras: list[str] = []
 
         self.ui.thinking("thinking")
         for event in self.brain.ask(payload):
@@ -929,6 +1029,9 @@ class Conversation:
 
             elif isinstance(event, ToolStarted):
                 self.ui.tool(event.name, event.detail)
+                unasked = self._unasked_use(granted, event)
+                if unasked is not None:
+                    extras.append(unasked)
                 # Speak as soon as Claude starts working, not when it finishes.
                 if not spoken_anything and not said_filler:
                     said_filler = True
@@ -999,6 +1102,9 @@ class Conversation:
                     total_s=time.monotonic() - started,
                     first_speech_s=(spoke_at - started) if spoke_at else None,
                 )
+                if extras:
+                    self._report_unasked(extras)
+
                 if requests and self.config.consent_enabled:
                     # Only the first is put to the user; the rest are recorded
                     # as refused rather than vanishing. They were being dropped

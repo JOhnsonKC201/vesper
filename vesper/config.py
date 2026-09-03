@@ -155,6 +155,13 @@ class ListeningSettings:
     # small.en: base.en could not reliably hear the wake word on a
     # real voice, waking on only two of nine attempts.
     whisper_model: str = "small.en"
+    # Where transcription runs. `auto` asks CTranslate2, which is the runtime
+    # that actually does it, and uses the gpu when the gpu genuinely works.
+    # `cpu` pins it down. `cuda` demands the gpu and still falls back rather
+    # than leaving you with an assistant that cannot hear.
+    whisper_device: str = "auto"
+    # `auto` picks float16 on the gpu and int8 on the cpu.
+    whisper_compute: str = "auto"
     wake_required: bool = True
     # How long he stays awake after you speak, with the clock reset by every
     # thing you say. 0 means the wake word is required every single time, which

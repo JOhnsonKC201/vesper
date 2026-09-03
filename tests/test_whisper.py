@@ -4,6 +4,7 @@ The model is loaded once per module: it is the slow part, and reloading it per
 test would make the suite unpleasant enough that people stop running it.
 """
 
+import os
 import wave
 from pathlib import Path
 
@@ -115,3 +116,122 @@ def test_repeated_calls_do_not_reload_the_model(listener):
     model = listener._model
     listener.transcribe(load_wav("speech_short.wav"))
     assert listener._model is model
+
+
+# --- which runtime gets asked about the gpu ---------------------------------
+#
+# faster-whisper does not use torch. It runs on CTranslate2, which is its own
+# runtime with its own CUDA build. `_cuda_available` asked torch, and torch
+# here is deliberately the cpu build (it is installed for Silero VAD and the
+# voiceprint model), so the answer was "no gpu" on every machine forever,
+# whatever card was in it. On this machine CTranslate2 reports one device and
+# transcribes 11x faster than the cpu path it was being pinned to.
+
+
+def test_the_gpu_question_is_put_to_ctranslate2_and_never_to_torch():
+    import inspect
+
+    from vesper.stt import accel, whisper as whisper_module
+
+    source = inspect.getsource(whisper_module)
+    assert "torch" not in source, (
+        "faster-whisper runs on CTranslate2. Asking torch whether the gpu is "
+        "usable is asking a library that does not do the work, and the cpu "
+        "build of torch always answers no."
+    )
+    assert "ctranslate2" in inspect.getsource(accel)
+
+
+def test_a_device_being_present_is_not_enough_to_be_trusted(monkeypatch):
+    """The worst shape this bug can take.
+
+    CTranslate2 reports a CUDA device on a machine with no CUDA runtime. The
+    model then builds without complaint and every transcription afterwards
+    raises. Load time success with inference time failure means Vesper starts
+    fine at login and dies the first time you speak to it, with no console for
+    the traceback to land in. So the probe is a real inference.
+    """
+    from vesper.stt import accel
+
+    monkeypatch.setattr(accel, "device_count", lambda: 1)
+    monkeypatch.setattr(
+        accel, "probe", lambda model: "RuntimeError: cublas64_12.dll not found"
+    )
+    logged: list[str] = []
+    stt = Listener(WhisperConfig(model="tiny.en", device="auto"), log=logged.append)
+    stt.load()
+    assert stt.resolved_device == "cpu"
+    assert any("falling back to cpu" in line for line in logged)
+    # And it still works, which is the entire point of falling back.
+    assert stt.transcribe(load_wav("speech_short.wav")).ok
+
+
+def test_an_explicit_cuda_that_cannot_even_build_still_leaves_working_ears(monkeypatch):
+    from vesper.stt import accel, whisper as whisper_module
+
+    real_build = whisper_module.Listener._build
+
+    def refuse_cuda(self, device, compute):
+        if device == "cuda":
+            raise RuntimeError("no CUDA driver")
+        return real_build(self, device, compute)
+
+    monkeypatch.setattr(whisper_module.Listener, "_build", refuse_cuda)
+    monkeypatch.setattr(accel, "device_count", lambda: 1)
+    stt = Listener(WhisperConfig(model="tiny.en", device="cuda"), log=lambda m: None)
+    stt.load()
+    assert stt.resolved_device == "cpu"
+
+
+def test_one_failed_transcription_does_not_end_the_assistant(monkeypatch):
+    """An always on assistant started from a login shortcut has no console.
+
+    An exception out of `transcribe` used to propagate through `_handle_block`
+    and out of `run()`, which had only `except KeyboardInterrupt`. The failure
+    that produces is Vesper going silent, permanently, at the moment you first
+    speak to it.
+    """
+    stt = Listener(WhisperConfig(model="tiny.en", device="cpu"), log=lambda m: None)
+    stt.load()
+
+    class Exploding:
+        def transcribe(self, *a, **k):
+            raise RuntimeError("the gpu fell over")
+
+    stt._model = Exploding()
+    stt.resolved_device = "cpu"  # nothing left to fall back to
+    result = stt.transcribe(load_wav("speech_short.wav"))
+    assert result.ok is False
+    assert result.rejected_reason == "transcription-failed"
+    assert stt.failures == 1
+
+
+def test_a_gpu_that_fails_mid_session_moves_to_the_cpu_and_keeps_going():
+    """A driver reset should cost one utterance, not the rest of the day."""
+    stt = Listener(WhisperConfig(model="tiny.en", device="cpu"), log=lambda m: None)
+    stt.load()
+    working = stt._model
+
+    class ExplodesOnce:
+        def transcribe(self, *a, **k):
+            raise RuntimeError("device lost")
+
+    stt._model = ExplodesOnce()
+    stt.resolved_device = "cuda"  # pretend we were on the gpu
+    stt._build = lambda device, compute: setattr(stt, "_model", working) or (
+        setattr(stt, "resolved_device", device)
+    )
+    result = stt.transcribe(load_wav("speech_short.wav"))
+    assert stt.resolved_device == "cpu"
+    assert result.ok, "the retry on the cpu should have produced a real transcript"
+
+
+def test_the_cuda_dll_search_is_idempotent():
+    """`enable_dll_search` is called from the model load and the self check."""
+    from vesper.stt import accel
+
+    first = accel.enable_dll_search()
+    before = os.environ["PATH"]
+    second = accel.enable_dll_search()
+    assert first == second
+    assert os.environ["PATH"] == before, "PATH must not grow on every call"

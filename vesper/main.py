@@ -198,6 +198,8 @@ def build(cfg: config_module.Config, *, with_mic: bool = True):
     stt = Listener(
         WhisperConfig(
             model=cfg.listening.whisper_model,
+            device=cfg.listening.whisper_device,
+            compute_type=cfg.listening.whisper_compute,
             initial_prompt=wake_word_prompt(
                 cfg.identity.wake_words, cfg.identity.name
             ),
@@ -558,7 +560,31 @@ def check(cfg: config_module.Config, *, gate: bool = True) -> int:
     try:
         import faster_whisper  # noqa: F401
 
-        report("whisper", True, cfg.listening.whisper_model)
+        # Loading it, not merely importing it. The import proves a package is
+        # installed; it does not answer "will this transcribe, and on what".
+        # A configured `cuda` that cannot really work builds a model happily
+        # and then raises on every utterance, so the only honest answer here
+        # comes from a model that has actually been built and probed.
+        probe = Listener(
+            WhisperConfig(
+                model=cfg.listening.whisper_model,
+                device=cfg.listening.whisper_device,
+                compute_type=cfg.listening.whisper_compute,
+                cpu_threads=cfg.listening.cpu_threads,
+            )
+        )
+        probe.load()
+        report(
+            "whisper",
+            True,
+            f"{probe.resolved_model} on {probe.resolved_device}/{probe.resolved_compute}",
+        )
+        if probe.resolved_device != "cuda":
+            from .stt import accel
+
+            hint = accel.missing_runtime_hint()
+            if hint:
+                print(f"  --    gpu  {hint}")
     except Exception as exc:
         report("whisper", False, f"{type(exc).__name__}: {exc}")
 

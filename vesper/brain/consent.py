@@ -242,6 +242,18 @@ def _speakable_path(path: str) -> str:
     return name.replace("_", " ").replace(".", " dot ")
 
 
+def _speakable_url(url: str) -> str:
+    """A URL as a person says it: the host, never the query string.
+
+    The host is the part that answers "where is this going", which is the only
+    question worth asking out loud. Reading a full URL aloud is unlistenable
+    and the written form in the audit log keeps every character anyway.
+    """
+    cleaned = url.split("://", 1)[-1]
+    host = cleaned.split("/", 1)[0].split("@")[-1].split(":")[0]
+    return (host or url).replace(".", " dot ")
+
+
 @dataclass(frozen=True)
 class ActionRequest:
     """One thing Vesper was stopped from doing, and what approving it costs."""
@@ -256,7 +268,11 @@ class ActionRequest:
         if self.tool in _WRITE_TOOLS:
             path = self.tool_input.get("file_path") or self.tool_input.get("notebook_path") or ""
             verb = "create" if self.tool == "Write" else "edit"
-            return f"{verb} {_speakable_path(path)}" if path else f"{verb} a file"
+            if not path:
+                # No path to name. The grant is the same width either way, so
+                # the question has to carry the whole weight of it.
+                return f"{verb} a file, which lets me write to any of them"
+            return f"{verb} {_speakable_path(path)}, which lets me write to other files too"
         if self.tool == "Bash":
             verbs = _verbs(str(self.tool_input.get("command") or ""))
             if not verbs:
@@ -273,6 +289,12 @@ class ActionRequest:
                 return f"run {spoken}, which can do anything"
             return f"run {spoken}"
         if self.tool == "WebFetch":
+            url = str(self.tool_input.get("url") or "")
+            # Naming it matters more here than anywhere: this is the one action
+            # that sends something off the machine, and "a page from the web"
+            # told you nothing about which page or what it carried.
+            if url:
+                return f"fetch {_speakable_url(url)} from the web"
             return "fetch a page from the web"
         return f"use {self.tool}"
 
@@ -284,11 +306,33 @@ class ActionRequest:
                 return f"{self.tool}: {value.strip()[:200]}"
         return self.tool
 
+    @property
+    def whole_tool(self) -> bool:
+        """Does saying yes hand over the tool itself, not one use of it?
+
+        Measured against claude 2.1.259, not assumed. `Bash(git commit:*)` is
+        honoured and scopes an approval to one verb. A path scoped
+        `Write(C:/Users/johns/notes.txt)` is not honoured at all: every form
+        tried, through `--allowedTools` and through `--settings`, refused even
+        the file it named, while a bare `Write` allowed writing to a file that
+        was never mentioned to the user. So for these tools the narrowest grant
+        the CLI will accept is the tool itself, and the honest thing is to say
+        so in the question rather than let "edit notes dot txt" sound like the
+        approval stops at notes dot txt.
+        """
+        return self.tool != "Bash"
+
     def grants(self) -> tuple[str, ...]:
         """The narrowest allowlist specs that let exactly this through.
 
         Deliberately not "whatever it asks for next". A yes to `git commit`
         returns `Bash(git commit:*)`, so that approval cannot be spent on `rm`.
+
+        For everything else the CLI offers no finer grain than the tool, which
+        `whole_tool` exists to make sayable. What keeps that honest is not this
+        function: it is the question naming the wider grant, `revoke_soon()`
+        taking it straight back, and `Conversation` logging any other file the
+        grant is spent on while it is open.
         """
         if self.tool == "Bash":
             verbs = _verbs(str(self.tool_input.get("command") or ""))

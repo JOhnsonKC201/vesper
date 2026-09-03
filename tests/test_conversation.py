@@ -364,7 +364,8 @@ def test_permission_requests_reach_the_ui_and_are_asked_out_loud():
     # its own explanation of what it was trying to do.
     assert voice.lines == [
         "I want to save that note.",
-        "I want to create notes dot txt. Do I do this for you?",
+        "I want to create notes dot txt, which lets me write to other files "
+        "too. Do I do this for you?",
     ]
 
 
@@ -389,3 +390,39 @@ class _AlternatingSpeech:
 
     def reset(self):
         pass
+
+
+def test_one_bad_audio_block_does_not_end_the_assistant():
+    """`run()` caught only KeyboardInterrupt.
+
+    Anything else out of transcription, the voiceprint or the turn itself went
+    straight through the loop and out of `run()`. Started from a login shortcut
+    there is no console for that traceback, so the symptom is Vesper vanishing
+    the moment you speak to it and nothing anywhere saying why.
+    """
+    conv, brain, stt, voice, speaker, ui = build(transcripts=["Vesper hello"])
+
+    blocks = [np.zeros(480, dtype=np.float32) for _ in range(3)]
+    handled: list[int] = []
+
+    def explode_once(block):
+        handled.append(len(handled))
+        if len(handled) == 1:
+            raise RuntimeError("the gpu fell over")
+
+    conv._handle_block = explode_once
+    conv.mic.blocks = list(blocks)
+
+    def read(timeout=0.5):
+        if not conv.mic.blocks:
+            conv._running.clear()
+            return None
+        return conv.mic.blocks.pop(0)
+
+    conv.mic.read = read
+    conv.run()
+
+    assert len(handled) == 3, "the loop kept going after the block that raised"
+    assert conv.errors == 1
+    assert any("handling audio failed" in message for message in ui.errors)
+    assert conv.status()["errors"] == 1

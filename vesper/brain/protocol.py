@@ -128,7 +128,7 @@ def encode_user_message(text: str) -> str:
 _MAX_REMEMBERED_CALLS = 200
 
 
-def _tool_detail(name: str, tool_input: dict) -> str:
+def tool_detail(name: str, tool_input: dict) -> str:
     """One short human phrase describing a tool call, for the terminal."""
     if not isinstance(tool_input, dict):
         return ""
@@ -184,7 +184,7 @@ class StreamParser:
             self._denied.add(tool_use_id)
         return PermissionNeeded(
             tool=tool,
-            detail=_tool_detail(tool, resolved),
+            detail=tool_detail(tool, resolved),
             tool_input=resolved,
             tool_use_id=tool_use_id,
             message=message,
@@ -254,7 +254,7 @@ class StreamParser:
                         if len(self._tool_uses) > _MAX_REMEMBERED_CALLS:
                             self._tool_uses.clear()
                         self._tool_uses[block_id] = (name, tool_input)
-                    yield ToolStarted(name, _tool_detail(name, tool_input))
+                    yield ToolStarted(name, tool_detail(name, tool_input))
             return
 
         if kind == "result":

@@ -16,7 +16,12 @@ from vesper import audit, config as config_module
 from vesper.brain.claude import BrainConfig
 from vesper.brain.consent import NO, UNCLEAR, YES, ActionRequest, _verbs, hear_answer
 from vesper.brain.persona import is_refusal_noise
-from vesper.brain.protocol import PermissionNeeded, StreamParser, TurnComplete
+from vesper.brain.protocol import (
+    PermissionNeeded,
+    StreamParser,
+    ToolStarted,
+    TurnComplete,
+)
 from vesper.conversation import Conversation, ConversationConfig
 from vesper.wake import WakeConfig, WakeGate
 
@@ -69,8 +74,39 @@ def test_a_qualified_yes_is_not_a_yes():
 
 def test_a_file_write_is_described_by_its_name_not_its_path():
     request = ActionRequest("Write", {"file_path": "C:/Users/johns/notes.txt"})
-    assert request.spoken() == "create notes dot txt"
+    assert request.spoken().startswith("create notes dot txt")
     assert "C:/Users/johns/notes.txt" in request.written()
+
+
+def test_a_write_says_out_loud_that_the_grant_is_wider_than_the_file():
+    """The invariant `approvable` exists for: the question has to cover the grant.
+
+    `grants()` returns bare `Write`, because measured against claude 2.1.259 a
+    path scoped `Write(...)` rule is refused even for the path it names while a
+    bare `Write` allows writing to a file that was never mentioned. Since the
+    grant cannot be narrowed, the question is what has to widen.
+    """
+    request = ActionRequest("Write", {"file_path": "C:/Users/johns/notes.txt"})
+    assert request.whole_tool is True
+    assert request.grants() == ("Write",)
+    assert "other files" in request.spoken()
+
+
+def test_a_shell_verb_is_scoped_so_its_question_stays_narrow():
+    """The counterpart: Bash *is* scopeable, so it must not gain the warning."""
+    request = ActionRequest("Bash", {"command": "git commit -m x"})
+    assert request.whole_tool is False
+    assert request.grants() == ("Bash(git commit:*)",)
+    assert "other files" not in request.spoken()
+
+
+def test_a_web_fetch_names_the_host_it_is_reaching():
+    """The one action that sends something off the machine used to say only
+    "a page from the web", which named nothing at all."""
+    request = ActionRequest("WebFetch", {"url": "https://example.com/a?token=secret"})
+    assert "example dot com" in request.spoken()
+    # The audit log keeps every character, including the part not said aloud.
+    assert "token=secret" in request.written()
 
 
 def test_a_shell_command_is_described_by_its_verb():
@@ -273,7 +309,7 @@ def test_only_the_refusal_sentence_is_dropped_not_the_useful_one():
     speaker.close()
     assert voice.lines == [
         "I wanted to add your meeting note to that file.",
-        "I want to create notes dot txt. Do I do this for you?",
+        "I want to create notes dot txt, which lets me write to other files too. Do I do this for you?",
     ]
 
 
@@ -352,7 +388,7 @@ def test_a_refused_action_becomes_a_spoken_question():
     assert conv._pending is not None
     assert voice.lines == [
         "I could not do that.",
-        "I want to create notes dot txt. Do I do this for you?",
+        "I want to create notes dot txt, which lets me write to other files too. Do I do this for you?",
     ]
     assert ui.permissions == [("Write", "Write: C:/notes.txt")]
 
@@ -627,3 +663,153 @@ def test_nothing_in_the_default_allowlist_can_act_without_asking():
         for danger in banned:
             assert f"Bash({danger}" not in spec, spec
     assert "WebSearch" not in allowed, "sends text off the machine with no consent"
+
+
+# --- what a widened grant actually gets spent on ----------------------------
+#
+# The CLI will not scope a Write or an Edit to one path. Measured against
+# claude 2.1.259: a bare `Write` grant wrote a file that had never been
+# mentioned to the user, and every path scoped form tried, through
+# `--allowedTools` and through `--settings`, refused even the file it named.
+# So a yes to "edit notes dot txt" is a yes to `Edit` until it is taken back.
+# The question now says so. These pin the other half: Vesper notices.
+
+
+def test_a_tool_call_matching_the_approved_one_is_not_flagged():
+    from vesper.conversation import Conversation
+
+    request = ActionRequest("Write", {"file_path": "C:/notes.txt"})
+    event = ToolStarted("Write", "C:/notes.txt")
+    assert Conversation._unasked_use(request, event) is None
+
+
+def test_the_same_tool_on_a_different_file_is_flagged():
+    """The whole point. `Write` was approved for notes.txt and spent on another."""
+    from vesper.conversation import Conversation
+
+    request = ActionRequest("Write", {"file_path": "C:/notes.txt"})
+    event = ToolStarted("Write", "C:/Users/johns/.ssh/authorized_keys")
+    flagged = Conversation._unasked_use(request, event)
+    assert flagged == "Write: C:/Users/johns/.ssh/authorized_keys"
+
+
+def test_reading_is_never_flagged_because_reading_was_never_granted():
+    """Read, Grep and Glob run all day without asking. They are not overreach."""
+    from vesper.conversation import Conversation
+
+    request = ActionRequest("Write", {"file_path": "C:/notes.txt"})
+    for tool in ("Read", "Grep", "Glob"):
+        event = ToolStarted(tool, "C:/anything.txt")
+        assert Conversation._unasked_use(request, event) is None
+
+
+def test_nothing_is_flagged_when_no_grant_is_open():
+    from vesper.conversation import Conversation
+
+    event = ToolStarted("Write", "C:/anything.txt")
+    assert Conversation._unasked_use(None, event) is None
+
+
+def test_a_blank_permission_mode_falls_back_to_manual_not_to_nothing():
+    """A typo in config.yaml must never be able to open the gate.
+
+    `if self.permission_mode:` dropped the flag entirely on a blank value, and
+    the session then ran in `auto`, where a Write under cwd goes through with
+    nobody asked. Failing toward `manual` is the only safe direction.
+    """
+    from vesper.brain.claude import BrainConfig
+
+    for blank in ("", "   ", None):
+        argv = BrainConfig(permission_mode=blank).argv()
+        assert "--permission-mode" in argv
+        assert argv[argv.index("--permission-mode") + 1] == "manual"
+
+
+def test_a_second_shell_command_under_the_same_verb_is_not_flagged():
+    """`Bash(git commit:*)` is exactly what the question said out loud.
+
+    A second `git commit` is inside the approval as spoken, so flagging it
+    would be noise. The file tools are flagged because their grant is wider
+    than their sentence, which is the whole distinction `whole_tool` draws.
+    """
+    from vesper.conversation import Conversation
+
+    request = ActionRequest("Bash", {"command": "git commit -m first"})
+    event = ToolStarted("Bash", "git commit -m second")
+    assert Conversation._unasked_use(request, event) is None
+
+
+def test_a_grant_spent_on_another_file_is_logged_and_said_out_loud(tmp_path):
+    """End to end, through a real approved turn.
+
+    The user is asked about `notes.txt` and says yes. The grant is bare `Write`,
+    because the CLI will not take a narrower one, so on the approved turn Claude
+    also writes `secrets.env`. Nobody was asked about that file, and before this
+    nothing anywhere would have said so.
+    """
+
+    class WidenedBrain(DenyingBrain):
+        def ask(self, text):
+            self.turns_asked += 1
+            if self.turns_asked == 1:
+                yield PermissionNeeded(
+                    "Write", "detail",
+                    tool_input={"file_path": "C:/notes.txt"},
+                    tool_use_id="toolu_1",
+                )
+                yield TurnComplete(text="I could not do that.", turns=1)
+                return
+            # The approved turn. The first call is the one that was approved;
+            # the second is the one the widened grant also permits.
+            yield ToolStarted("Write", "C:/notes.txt")
+            yield ToolStarted("Write", "C:/secrets.env")
+            yield TurnComplete(text="Done.", turns=2)
+
+    log = tmp_path / "actions.log"
+    brain = WidenedBrain()
+    conv, speaker, ui, voice = _build(
+        brain, ["Vesper save that", "Vesper yes"], audit_log=log
+    )
+    conv._on_utterance(_audio())
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    speaker.close()
+
+    assert conv.approvals == 1
+    assert conv.unasked == 1, "the second file was never put to the user"
+    assert ("unasked", "Write: C:/secrets.env") in ui.decisions
+    written = log.read_text(encoding="utf-8")
+    assert "unasked\tWrite: C:/secrets.env" in written
+    assert "secrets.env" not in " ".join(voice.lines), (
+        "the spoken line reports that it happened, without reading a path aloud"
+    )
+    assert any("didn't approve" in line for line in voice.lines)
+
+
+def test_the_approved_file_itself_is_not_reported_as_unasked(tmp_path):
+    """The obvious false positive: the action the user actually said yes to."""
+
+    class ObedientBrain(DenyingBrain):
+        def ask(self, text):
+            self.turns_asked += 1
+            if self.turns_asked == 1:
+                yield PermissionNeeded(
+                    "Write", "detail",
+                    tool_input={"file_path": "C:/notes.txt"},
+                    tool_use_id="toolu_1",
+                )
+                yield TurnComplete(text="I could not do that.", turns=1)
+                return
+            yield ToolStarted("Write", "C:/notes.txt")
+            yield TurnComplete(text="Done.", turns=2)
+
+    brain = ObedientBrain()
+    conv, speaker, ui, voice = _build(brain, ["Vesper save that", "Vesper yes"])
+    conv._on_utterance(_audio())
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    speaker.close()
+
+    assert conv.approvals == 1
+    assert conv.unasked == 0
+    assert not any("didn't approve" in line for line in voice.lines)

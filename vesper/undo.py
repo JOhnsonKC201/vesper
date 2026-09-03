@@ -201,12 +201,20 @@ class UndoStore:
             return []
 
     def _save(self, snapshots: list[Snapshot]) -> None:
+        # Write then replace, the same as the lessons and session stores. This
+        # was the one store still writing in place, which is the wrong one to
+        # skip it on: a crash or a locked file mid write leaves a truncated
+        # ledger, `_load` cannot parse it and returns nothing, and the very
+        # next approved action saves that nothing back over the top. One
+        # interrupted write would quietly take every recoverable change with
+        # it, in the file whose whole job is being there when something went
+        # wrong.
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
-            self.ledger.write_text(
-                json.dumps([s.to_dict() for s in snapshots], indent=2),
-                encoding="utf-8",
-            )
+            payload = json.dumps([s.to_dict() for s in snapshots], indent=2)
+            temporary = self.ledger.with_suffix(self.ledger.suffix + ".tmp")
+            temporary.write_text(payload, encoding="utf-8")
+            temporary.replace(self.ledger)
         except (OSError, ValueError):
             pass
 
@@ -294,6 +302,9 @@ class UndoStore:
             return False, f"I can't undo that, {reason}."
 
         restored, failed = 0, ""
+        # Which ones actually came back. The spoken sentence used to name
+        # `files[0]` regardless, which is only right by luck.
+        restored_names: list[str] = []
         for saved in snapshot.files:
             try:
                 target = Path(saved.original)
@@ -307,12 +318,14 @@ class UndoStore:
                     shutil.copy2(saved.copy, target)
                     Path(saved.copy).unlink(missing_ok=True)
                     restored += 1
+                    restored_names.append(saved.original)
                 elif not saved.existed:
                     # It did not exist before the action, so putting things back
                     # means removing what the action created.
                     if target.exists() and target.is_file():
                         target.unlink()
                     restored += 1
+                    restored_names.append(saved.original)
             except (OSError, ValueError) as exc:
                 failed = str(exc)
 
@@ -322,9 +335,25 @@ class UndoStore:
             # the recovery permanently.
             return False, f"I tried to undo that and couldn't, {failed}."
 
+        if restored < len(snapshot.files):
+            # Some came back and some did not. This used to count as success:
+            # the whole entry was popped, which orphaned the copies of the
+            # files that had not been restored, and the sentence named
+            # `files[0]` whether or not that was one of the ones that made it.
+            # So Vesper could say "put notes dot txt back" about the one file
+            # it had just failed on, and then throw away the only record that
+            # could have tried again.
+            self._save(snapshots)
+            missing = len(snapshot.files) - restored
+            return True, (
+                f"Put {restored} of {len(snapshot.files)} files back. "
+                f"I couldn't reach the other {'one' if missing == 1 else str(missing)}, "
+                f"{failed or 'the copy is gone'}, so I'm keeping that one on the list."
+            )
+
         snapshots.pop()
         self._save(snapshots)
-        name = Path(snapshot.files[0].original).name
         if restored == 1:
+            name = Path(restored_names[0]).name
             return True, f"Put {name} back."
         return True, f"Put {restored} files back."

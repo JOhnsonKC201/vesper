@@ -93,8 +93,14 @@ class BrainConfig:
             "--model", self.model,
             "--system-prompt", self.system_prompt,
         ]
-        if self.permission_mode:
-            args += ["--permission-mode", self.permission_mode]
+        # Never `if self.permission_mode:`. A blank or commented out value in
+        # config.yaml dropped the flag entirely, and the session then ran in
+        # `auto`, where a Write under cwd goes through unannounced. A typo
+        # silently turning off the one thing holding the gate shut is the worst
+        # available failure, so an unrecognised value falls back to manual
+        # rather than to nothing.
+        mode = (self.permission_mode or "").strip() or "manual"
+        args += ["--permission-mode", mode]
         if self.tools:
             args += ["--tools", ",".join(self.tools)]
         # Grants are the one-shot widening earned by a spoken yes. They ride on

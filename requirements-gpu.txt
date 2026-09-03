@@ -1,0 +1,15 @@
+# Optional: Whisper on the graphics card instead of the processor.
+#
+# Not in requirements.txt because these two wheels are 1.3GB and most machines
+# will not use them. Without them Vesper transcribes on the cpu exactly as it
+# always did; `whisper_device: auto` notices and says so in the log.
+#
+# Measured on an RTX 5060 with small.en: 1,516ms on the cpu against 130ms here,
+# for identical transcripts. Transcription sits directly in front of the reply,
+# so that is 1.4 seconds off every single thing you say.
+#
+# These supply the CUDA 12 runtime CTranslate2 links against. torch is
+# deliberately left as the cpu build: it is only here for Silero VAD and the
+# voiceprint model, neither of which is on the critical path.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12

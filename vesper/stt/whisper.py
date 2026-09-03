@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import accel
+
 # Whisper's greatest hits when handed silence or noise. Only applied to short
 # clips, where a genuine utterance of this text is implausible.
 HALLUCINATIONS = frozenset(
@@ -159,20 +161,60 @@ class Listener:
         self._model = None
         self.resolved_model = ""
         self.resolved_device = ""
+        self.resolved_compute = ""
+        # Surfaced by --check and the dashboard: a silent assistant with a
+        # rising failure count is a very different bug from a deaf one.
+        self.failures = 0
 
     # --- model --------------------------------------------------------------
 
     def load(self) -> None:
         if self._model is not None:
             return
-        from faster_whisper import WhisperModel
 
         device = self.config.device
-        compute = self.config.compute_type
         if device == "auto":
-            device = "cuda" if self._cuda_available() else "cpu"
+            device = "cuda" if accel.device_count() else "cpu"
+        if device == "cuda":
+            # Before the model is built, not after: CTranslate2 resolves its
+            # CUDA libraries at construction, and PATH is what it reads.
+            accel.enable_dll_search()
+
+        compute = self.config.compute_type
         if compute == "auto":
-            compute = "float16" if device == "cuda" else "int8"
+            compute = accel.best_compute_type(device)
+
+        try:
+            self._build(device, compute)
+        except Exception as exc:
+            # An explicit `device: cuda` in the config on a machine that cannot
+            # do it is a mistake to report, not a reason to have no ears.
+            if device == "cpu":
+                raise
+            self._log(f"whisper could not build on {device}: {type(exc).__name__}: {exc}")
+            self._build("cpu", accel.best_compute_type("cpu"))
+            return
+
+        # A model that built on the GPU has proved nothing yet. If the runtime
+        # is not really there, every transcription raises instead, and the
+        # first one is the first time you speak to it.
+        if device == "cuda":
+            problem = accel.probe(self._model)
+            if problem:
+                self._log(f"whisper cuda unusable ({problem}), falling back to cpu")
+                hint = accel.missing_runtime_hint()
+                if hint:
+                    self._log(f"whisper: {hint}")
+                self._build(
+                    "cpu",
+                    accel.best_compute_type("cpu")
+                    if self.config.compute_type == "auto"
+                    else self.config.compute_type,
+                )
+
+    def _build(self, device: str, compute: str) -> None:
+        """Construct the model on one device and record what actually happened."""
+        from faster_whisper import WhisperModel
 
         started = time.monotonic()
         self._model = WhisperModel(
@@ -183,19 +225,28 @@ class Listener:
         )
         self.resolved_model = self.config.model
         self.resolved_device = device
+        self.resolved_compute = compute
         self._log(
             f"whisper {self.config.model} on {device}/{compute} "
             f"loaded in {time.monotonic() - started:.2f}s"
         )
 
-    @staticmethod
-    def _cuda_available() -> bool:
-        try:
-            import torch
+    def _fall_back_to_cpu(self, reason: str) -> bool:
+        """Move to the CPU after the GPU failed mid session. True if it moved.
 
-            return bool(torch.cuda.is_available())
-        except Exception:
+        A driver reset or a card taken by something else should cost one
+        utterance, not the rest of the day. Only ever called when the current
+        device is cuda, so it cannot loop.
+        """
+        if self.resolved_device != "cuda":
             return False
+        self._log(f"whisper gpu failed ({reason}), moving to cpu for this session")
+        try:
+            self._build("cpu", accel.best_compute_type("cpu"))
+        except Exception as exc:  # nothing left to fall back to
+            self._log(f"whisper cpu reload failed: {type(exc).__name__}: {exc}")
+            return False
+        return True
 
     # --- transcription ------------------------------------------------------
 
@@ -214,28 +265,47 @@ class Listener:
         # 150-300ms, which is the difference between snappy and sluggish.
         beam = 1 if duration < self.config.short_clip_s else self.config.beam_size
 
-        segments, info = self._model.transcribe(
-            audio,
-            language=self.config.language,
-            beam_size=beam,
-            vad_filter=True,
-            word_timestamps=True,
-            # Without this, one bad transcription poisons every later one.
-            condition_on_previous_text=False,
-            initial_prompt=self.config.initial_prompt,
-        )
-
         pieces: list[str] = []
         logprobs: list[float] = []
         no_speech: list[float] = []
         weak_words: list[str] = []
-        for segment in segments:
-            pieces.append(segment.text)
-            logprobs.append(getattr(segment, "avg_logprob", 0.0) or 0.0)
-            no_speech.append(getattr(segment, "no_speech_prob", 0.0) or 0.0)
-            for word in getattr(segment, "words", None) or []:
-                if (word.probability or 1.0) < self.config.word_confidence_floor:
-                    weak_words.append(word.word.strip())
+        try:
+            segments, info = self._model.transcribe(
+                audio,
+                language=self.config.language,
+                beam_size=beam,
+                vad_filter=True,
+                word_timestamps=True,
+                # Without this, one bad transcription poisons every later one.
+                condition_on_previous_text=False,
+                initial_prompt=self.config.initial_prompt,
+            )
+
+            # Inside the try on purpose. `transcribe` hands back a generator and
+            # does no work until it is drawn from, so this loop is where a
+            # missing CUDA library or a driver reset actually raises.
+            for segment in segments:
+                pieces.append(segment.text)
+                logprobs.append(getattr(segment, "avg_logprob", 0.0) or 0.0)
+                no_speech.append(getattr(segment, "no_speech_prob", 0.0) or 0.0)
+                for word in getattr(segment, "words", None) or []:
+                    if (word.probability or 1.0) < self.config.word_confidence_floor:
+                        weak_words.append(word.word.strip())
+        except Exception as exc:
+            # Never let this reach the audio loop. An assistant started at login
+            # has no console, so an exception here is not a traceback anyone
+            # reads, it is Vesper going silent the moment you first speak to it.
+            reason = f"{type(exc).__name__}: {exc}"
+            if self._fall_back_to_cpu(reason):
+                return self.transcribe(audio, sample_rate)
+            self._log(f"transcription failed: {reason}")
+            self.failures += 1
+            return Transcript(
+                text="",
+                duration_s=duration,
+                latency_s=time.monotonic() - started,
+                rejected_reason="transcription-failed",
+            )
 
         text = " ".join(p.strip() for p in pieces if p.strip()).strip()
         transcript = Transcript(

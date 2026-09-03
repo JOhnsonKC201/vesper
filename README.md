@@ -254,10 +254,10 @@ From the moment you stop speaking to the first sound back. Measured by
 | Stage | Time |
 |---|---|
 | End-of-speech detection | 700ms (tunable) |
-| Whisper `base.en` transcription | 450ms |
+| Whisper `small.en` transcription | 130ms on the gpu, 1,516ms on the cpu |
 | Claude, until something is audible | 2,050ms |
 | Piper synthesis | starts immediately, 31x realtime |
-| **End of speech to first word** | **3.2s** |
+| **End of speech to first word** | **2.9s on the gpu, 4.3s on the cpu** |
 
 The third row is the interesting one. Claude's first *text* on those questions
 arrives at 4.4s, because it runs the command before saying anything. So when it
@@ -267,6 +267,53 @@ dead silence to just over three, and it is why the numbers above are 2.0s rather
 than 4.4s.
 
 A question needing no tools answers faster: about 1.4s total.
+
+The second row used to say 450ms and `base.en`, from before the model had to be
+made bigger to hear the wake word reliably. `small.en` on the cpu costs 1.5s,
+which is the single largest thing between you and an answer, and it was being
+paid on a machine with an idle graphics card. See the next section.
+
+### Whisper on the gpu
+
+faster-whisper does not use torch. It runs on CTranslate2, which is its own
+runtime with its own CUDA build. The device check asked
+`torch.cuda.is_available()`, and torch here is deliberately the cpu build,
+installed for Silero VAD and the voiceprint model. So the answer was "no gpu" on
+every machine, forever, whatever card was in it. CTranslate2 on this machine
+reports the card perfectly well.
+
+Measured on an RTX 5060, `small.en`, four spoken questions of about three
+seconds each, identical transcripts from both:
+
+| | Median | Min | Max |
+|---|---|---|---|
+| cpu, int8, 4 threads | 1,516ms | 1,462ms | 1,649ms |
+| gpu, float16 | **130ms** | 128ms | 137ms |
+
+Two packages are needed and are not installed by default, because they are
+1.3GB and most machines will not use them:
+
+```
+pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+```
+
+Nothing else changes. Without them `whisper_device: auto` stays on the cpu
+exactly as before, and `run.bat --check` prints which one is in use.
+
+Two details in it were not obvious. Those wheels drop their DLLs in
+`site-packages/nvidia/*/bin`, which is on nobody's PATH, and
+`os.add_dll_directory` does not help: CTranslate2 loads them from native code
+with a plain LoadLibrary, which never sees directories added for Python's own
+extension loading. They have to be on PATH before the model is built.
+
+And a device being present is not the same as it working. CTranslate2 reports
+one CUDA device on a machine with no CUDA runtime installed at all; the model
+then builds without complaint and every transcription afterwards raises
+`Library cublas64_12.dll is not found`. Load time success with inference time
+failure is the worst available shape, because it turns "the gpu is not set up"
+into "Vesper dies the first time you speak to it", at login, with no console for
+the traceback to land in. So the check is one real inference, run once at load,
+and anything that fails it falls back to the cpu and says so in the log.
 
 ### The cloud voice, measured
 
@@ -490,14 +537,38 @@ Three things make that a real gate rather than a polite one:
 is stopped before it happens. A model that decided to ignore its instructions
 would still be refused.
 
-**A yes grants only what the question named.** Approving `git commit` produces
-`Bash(git commit:*)` and nothing else, so it cannot be spent on `rm`. A chained
-command names every verb it will run, including any hidden inside `$(...)`, and
-a line with more separate commands than one spoken sentence can put fairly is
-refused rather than summarised. Approving an interpreter hands over the whole
-interpreter, so the question says "which can do anything" rather than "run
-python". A test asserts the property directly: no verb may be granted that was
-not spoken.
+**A yes grants only what the question named, for shell commands.** Approving
+`git commit` produces `Bash(git commit:*)` and nothing else, so it cannot be
+spent on `rm`. A chained command names every verb it will run, including any
+hidden inside `$(...)`, and a line with more separate commands than one spoken
+sentence can put fairly is refused rather than summarised. Approving an
+interpreter hands over the whole interpreter, so the question says "which can do
+anything" rather than "run python". A test asserts the property directly: no
+verb may be granted that was not spoken.
+
+**For files it does not, and the question now says so.** This paragraph used to
+claim the property held everywhere. It does not. Measured against claude
+2.1.259: a path scoped `Write(C:/Users/johns/notes.txt)` is refused even for the
+file it names, through `--allowedTools` and through `--settings` alike, while a
+bare `Write` allows writing to a file that was never mentioned to the user. The
+CLI offers no finer grain than the tool, so a yes to one file is a yes to
+`Write` until it is taken back, and "I want to create notes dot txt" was quietly
+a wider promise than it sounded.
+
+Three things now hold that line, since the grant itself cannot be narrowed:
+
+- The question carries the width it actually has. "I want to create notes dot
+  txt, **which lets me write to other files too**. Do I do this for you?" This
+  is the same move the interpreter case already made, for the same reason.
+- Every tool call made while that grant is open is checked against the one that
+  was approved. Anything else is counted, written to `var/actions.log` as
+  `unasked`, and said out loud at the end of the turn, so a grant spent on
+  something you were never asked about stops being invisible.
+- The grant is handed back the moment the action finishes, as it always was.
+
+`WebFetch` gained a name for the same reason. It used to ask "fetch a page from
+the web", which named nothing at all, on the one action that sends something off
+this machine. It now says which host.
 
 The grant lives on the process it was passed to and is handed back the moment
 the action finishes, because the ambient loop shares that brain and an
@@ -640,8 +711,10 @@ on an old request, and a grant never widens past the verb it was given for.
 
 - **The conversation does reach Anthropic.** Everything else is local, but the
   brain is Claude. That is inherent to "use Claude Code, not the API".
-- **Whisper runs on CPU.** `torch` here is the CPU build, so the RTX 5060 is
-  unused. `base.en` at 0.4s is fast enough that fixing this is not urgent.
+- **Whisper uses the gpu when the gpu is usable.** It asked torch about a
+  CTranslate2 runtime, which is the wrong library, so it never did. It now asks
+  CTranslate2 and proves the answer with a real inference. Without the two
+  CUDA packages named above it stays on the cpu, which costs 1.4s per turn.
 - **On speakers you cannot talk over it.** `half_duplex` is on by default
   because the alternative is it interrupting itself on every reply. Headphones
   plus `half_duplex: false` gives you barge-in back.

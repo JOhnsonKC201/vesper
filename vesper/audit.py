@@ -18,6 +18,11 @@ APPROVED = "approved"
 DECLINED = "declined"
 IGNORED = "ignored"
 UNDONE = "undone"
+# A tool call that rode in on somebody else's yes. The CLI will not scope a
+# Write or an Edit to one path, so an approval for one file is an approval for
+# the tool until it is taken back. This is how the ones you were never asked
+# about stop being invisible.
+UNASKED = "unasked"
 
 
 def record(path: Path | str, decision: str, action: str, *, at: datetime | None = None) -> None:

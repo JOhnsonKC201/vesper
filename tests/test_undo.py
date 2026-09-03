@@ -372,3 +372,59 @@ def test_a_malformed_ledger_does_not_take_the_assistant_down(tmp_path):
 
     assert store.undo_latest() == (False, "There's nothing to undo.")
     assert store.keep_copy("a", "Write", {"file_path": str(tmp_path / "x")}) is not None
+
+
+# --- partial restores, and the ledger surviving a crash ---------------------
+
+
+def test_a_partial_restore_keeps_the_entry_and_says_what_it_could_not_reach(tmp_path):
+    """The failure this replaces reported success and threw away the evidence.
+
+    Two files snapshotted, one copy missing. The old code popped the whole
+    entry, which orphaned the surviving copy so no later undo could ever reach
+    it, and named `files[0]` in the sentence whether or not that was the file
+    that actually came back.
+    """
+    store = UndoStore(tmp_path / "undo")
+    first, second = tmp_path / "notes.txt", tmp_path / "draft.txt"
+    first.write_text("original notes", encoding="utf-8")
+    second.write_text("original draft", encoding="utf-8")
+    # A plain two file removal is the multi file snapshot this code path is for.
+    store.keep_copy(
+        "delete two files", "Bash", {"command": f"rm {first} {second}"}
+    )
+
+    snapshot = store.latest()
+    assert len(snapshot.files) == 2
+    # The copy of the *first* file goes missing, so the one that survives is
+    # the second. This is exactly the case that used to name the wrong file.
+    Path(snapshot.files[0].copy).unlink()
+    first.write_text("changed", encoding="utf-8")
+    second.write_text("changed", encoding="utf-8")
+
+    done, sentence = store.undo_latest()
+    assert done is True
+    assert "1 of 2" in sentence
+    assert second.read_text(encoding="utf-8") == "original draft"
+    # The entry stays, so the unrecovered half is still on the list rather than
+    # orphaned on disk with nothing pointing at it.
+    assert store.latest() is not None
+
+
+def test_the_ledger_survives_a_crash_midway_through_writing_it(tmp_path):
+    """Every other store here writes to a temp file and replaces. This one did
+    not, and it is the one whose whole job is being there when something failed."""
+    store = UndoStore(tmp_path / "undo")
+    target = tmp_path / "notes.txt"
+    target.write_text("first", encoding="utf-8")
+    store.keep_copy("edit notes", "Write", {"file_path": str(target)})
+    assert store.latest() is not None
+
+    # A truncated ledger is what an interrupted write leaves behind.
+    store.ledger.write_text('[{"at": 1.0, "action"', encoding="utf-8")
+    assert store.latest() is None, "an unreadable ledger must read as empty"
+
+    # And no stray temp file is left lying around by a normal write.
+    target.write_text("second", encoding="utf-8")
+    store.keep_copy("edit notes again", "Write", {"file_path": str(target)})
+    assert list((tmp_path / "undo").glob("*.tmp")) == []
