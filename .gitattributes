@@ -1,0 +1,11 @@
+# The POSIX shim must stay LF. Git on this machine converts to CRLF on checkout,
+# and a shell script with CRLF fails as "bad interpreter: /bin/sh^M", which
+# would break Vasper's hands on the next fresh clone with no other symptom.
+vasper text eol=lf
+*.sh text eol=lf
+
+# cmd refuses to parse a batch file reliably with LF endings, so these are
+# pinned the other way for the same reason.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.vbs text eol=crlf
