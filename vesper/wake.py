@@ -26,10 +26,34 @@ from dataclasses import dataclass, field
 # the name via initial_prompt (see stt/whisper.py), those substitutions are rare
 # anyway, and the fuzzy pass below still catches near-misses.
 HOMOPHONES: dict[str, tuple[str, ...]] = {
+    # The name said out loud. Kept separate from the "vesper" entry below rather
+    # than merged into it, because the two behave differently under the fuzzy
+    # pass: see EXACT_ONLY.
+    "vasper": ("vasper", "vaspa", "vasber", "vaspr", "vaspers", "vasparr"),
+    # Still answered, deliberately. Whisper was biased toward this spelling for
+    # months and still lands on it, and neither spelling is ordinary English.
     "vesper": ("vesper", "vespa", "vester", "vespers", "vespr", "vesber"),
     "jarvis": ("jarvis", "javis", "jarvus", "jervis", "charvis"),
     "computer": ("computer", "computor"),
 }
+
+# Wake words matched exactly rather than approximately, because their fuzzy
+# neighbourhood is full of ordinary English.
+#
+# Measured, not assumed. Against the "vasper" spellings, difflib scores
+# "casper", "jasper" and "vaster" at 0.833, which is exactly what the genuine
+# mishearings "vasfer" and "vosper" score. "vase" and "vapor" reach 0.800;
+# "paper", "laser", "taser", "caper", "aspen" and "viper" all reach 0.727,
+# above the 0.72 the fuzzy pass accepts. No threshold separates the two sets,
+# so there is no fuzzy pass to tune here: "-asper" and "-aper" are productive
+# English endings in a way "-esper" is not, and a 60 word sample produced 18
+# false wakes.
+#
+# What is given up is catching a mishearing nobody has listed yet. What covers
+# that instead: the whisper initial_prompt now names Vasper, so the model is
+# biased toward producing it, and "vesper" keeps its fuzzy pass because its
+# neighbourhood is genuinely empty.
+EXACT_ONLY = frozenset({"vasper"})
 
 _WORD = re.compile(r"[a-z']+")
 
@@ -73,10 +97,13 @@ class WakeResult:
     reason: str = ""
 
 
-def _variants(words: tuple[str, ...]) -> set[str]:
+def _variants(words: tuple[str, ...], *, fuzzy: bool = False) -> set[str]:
+    """Every spelling that counts as the name. `fuzzy` drops the exact-only ones."""
     out: set[str] = set()
     for word in words:
         key = word.lower().strip()
+        if fuzzy and key in EXACT_ONLY:
+            continue
         out.update(HOMOPHONES.get(key, (key,)))
         out.add(key)
     return out
@@ -85,6 +112,7 @@ def _variants(words: tuple[str, ...]) -> set[str]:
 def strip_wake_word(text: str, words: tuple[str, ...]) -> tuple[str, str]:
     """Remove a leading or trailing wake word. Returns (remainder, matched)."""
     accepted = _variants(words)
+    approximate = _variants(words, fuzzy=True)
     tokens = _WORD.findall(text.lower())
     if not tokens:
         return text.strip(), ""
@@ -107,7 +135,7 @@ def strip_wake_word(text: str, words: tuple[str, ...]) -> tuple[str, str]:
         if index + 1 < len(head):
             joined.append((token + head[index + 1], 2))
         for candidate, span in joined:
-            if _close_enough(candidate, accepted):
+            if approximate and _close_enough(candidate, approximate):
                 pattern = re.compile(
                     r"^\W*(?:\w+\W+){%d}(?:\w+\W*){%d}" % (index, span),
                     re.IGNORECASE,

@@ -4,6 +4,7 @@ import pytest
 
 from vesper.brain.channels import ChannelRouter
 from vesper.brain.persona import clean_for_speech, frame_turn, split_channels
+from vesper.config import Identity
 from vesper.wake import WakeConfig, WakeGate, strip_wake_word
 
 # --- wake word --------------------------------------------------------------
@@ -253,3 +254,74 @@ def test_wake_word_prompt_is_empty_without_words():
     from vesper.stt.whisper import wake_word_prompt
 
     assert wake_word_prompt((), "") == ""
+
+
+# --- the name said out loud -------------------------------------------------
+
+
+def test_the_shipped_wake_words_are_the_ones_that_are_actually_said():
+    """Pinned so the tests below cannot drift from what a new install gets."""
+    assert Identity().wake_words == ("vasper", "vesper", "jarvis")
+    assert Identity().name == "Vasper"
+
+
+def test_hey_vasper_wakes_it_wherever_it_falls_in_the_sentence():
+    """The name is Vasper, and it was deaf to it at the end of an utterance.
+
+    The fuzzy pass scores "vasper" against "vesper" at 0.83 and so caught it at
+    the head, which hid the problem. The tail is matched against the homophone
+    list only, and "vasper" was not on it, so "what time is it, Vasper" was
+    deaf while "what time is it, Vespa" woke.
+    """
+    words = Identity().wake_words
+    for said in (
+        "hey Vasper what is my battery",
+        "Vasper what time is it",
+        "what time is it Vasper",
+        "are you there Vasper",
+    ):
+        gate = WakeGate(WakeConfig(words=words))
+        assert gate.check(said, 0.0).triggered, said
+
+
+def test_the_old_spelling_still_answers():
+    """Whisper was biased toward "Vesper" for months and still produces it.
+
+    Dropping it would mean the assistant going deaf on its own transcriptions
+    during the changeover, for no gain: neither spelling is ordinary English.
+    It is carried as its own wake word rather than as a vasper homophone,
+    because unlike vasper it is safe to match approximately.
+    """
+    words = Identity().wake_words
+    for said in ("Vesper are you there", "hey Vesper what is my battery", "Vespa what time is it"):
+        gate = WakeGate(WakeConfig(words=words))
+        assert gate.check(said, 0.0).triggered, said
+
+
+def test_the_wider_list_still_refuses_ordinary_english():
+    """The reason "whisper" and "jasper" came off the list in the first place."""
+    words = Identity().wake_words
+    for said in (
+        "whisper it to me quietly",
+        "best for now",
+        "that was a vast improvement",
+        "I will pass for now",
+        "the vase broke",
+    ):
+        gate = WakeGate(WakeConfig(words=words))
+        assert not gate.check(said, 0.0).triggered, said
+
+
+def test_whisper_is_biased_toward_the_name_that_is_actually_said():
+    from vesper.stt.whisper import wake_word_prompt
+
+    assert wake_word_prompt(("vasper", "jarvis"), "Vasper") == (
+        "Talking to an assistant named Vasper, also called Jarvis."
+    )
+
+
+def test_it_introduces_itself_by_the_name_it_answers_to():
+    """It said "Vesper here" while answering to Vasper, which is just wrong."""
+    from vesper.conversation import ConversationConfig
+
+    assert ConversationConfig().name == "Vasper"

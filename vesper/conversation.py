@@ -148,6 +148,9 @@ class ConversationConfig:
     # A second holding phrase if a turn is still running this long into it.
     still_working_after_s: float = 11.0
     greet_on_start: bool = True
+    # Spoken in the greeting. Hardcoded until the name became a
+    # setting, at which point it introduced itself as the wrong one.
+    name: str = "Vasper"
     # Ask before anything that changes the machine. Turning this off does not
     # make Vesper act without asking, it makes it unable to act at all: the
     # refusal still happens in the CLI, there is simply no way to answer it.
@@ -262,7 +265,7 @@ class Conversation:
         self.mic.start()
         self._running.set()
         if self.config.greet_on_start:
-            self.speaker.say("Vesper here. I'm listening.")
+            self.speaker.say(f"{self.config.name} here. I'm listening.")
 
     def stop(self) -> None:
         self._running.clear()

@@ -5,12 +5,15 @@
 # run and is gitignored. Edit that one, not this one.
 
 identity:
-  name: Vesper
+  name: Vasper
   # Used in the system prompt so Vesper can address you naturally.
   user: Johnson
   # Both are accepted. Whisper mishearings (Vespa, Whisper, Jasper) are handled
   # in vesper/wake.py, so you do not need to enunciate.
-  wake_words: [vesper, jarvis]
+  # Both spellings answer. The name is Vasper; Whisper has been biased
+  # toward Vesper for months and still lands on it, so wake.py accepts
+  # the mishearings of both.
+  wake_words: [vasper, vesper, jarvis]
   # Free text appended to the persona. This is the dial for how it feels.
   # Try: "Be a little sardonic. Never say sorry twice in one conversation."
   personality: ""

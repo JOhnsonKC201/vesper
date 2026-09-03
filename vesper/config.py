@@ -22,9 +22,9 @@ DEFAULT_CONFIG_PATH = ROOT / "packaging" / "default" / "config.yaml"
 
 @dataclass
 class Identity:
-    name: str = "Vesper"
+    name: str = "Vasper"
     user: str = "the user"
-    wake_words: tuple[str, ...] = ("vesper", "jarvis")
+    wake_words: tuple[str, ...] = ("vasper", "vesper", "jarvis")
     # Free text appended to the system prompt. The place to tell Vesper to be
     # funnier, terser, or to always call you by name.
     personality: str = ""

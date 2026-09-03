@@ -240,6 +240,7 @@ def build(cfg: config_module.Config, *, with_mic: bool = True):
             barge_in_blocks=cfg.listening.barge_in_blocks,
             self_mute_ms=cfg.listening.self_mute_ms,
             greet_on_start=cfg.ui.greet_on_start,
+            name=cfg.identity.name,
             consent_enabled=cfg.consent.enabled,
             consent_window_s=cfg.consent.window_s,
             audit_log=cfg.audit_path(),
