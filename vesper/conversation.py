@@ -31,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audit, learning
+from . import audit, learning, register
 from .audio.mic import Microphone
 from .audio.speaker import Speaker
 from .audio.vad import EndpointConfig, Endpointer, VoiceActivity
@@ -228,6 +228,10 @@ class Conversation:
         self.unasked = 0
         # Blocks that raised and were survived rather than fatal.
         self.errors = 0
+        # How the session is going, and how the next turn should be pitched.
+        self.register = register.Register()
+        # The last thing asked, to notice it being asked again.
+        self._last_asked = ""
         self.voice_rejections = 0
         self._paused = False
         self._started_at = time.monotonic()
@@ -600,6 +604,22 @@ class Conversation:
             # question "is this threshold right for my room" has real data.
             self.ui.info(f"unsure it was you, voice score {score:.2f}, answering anyway")
         return True
+
+    def _repeats_the_last_question(self, text: str) -> bool:
+        """Was that more or less the same thing again?
+
+        Same overlap test `_is_own_voice` uses, at a lower bar: an echo has to
+        be near identical to be thrown away, but a rephrasing only has to be
+        recognisable to mean the previous answer missed.
+        """
+        if not self._last_asked:
+            return False
+        now = set(_WORDS.findall(text.lower()))
+        before = set(_WORDS.findall(self._last_asked.lower()))
+        if len(now) < 3 or len(before) < 3:
+            return False
+        overlap = len(now & before) / min(len(now), len(before))
+        return overlap >= 0.6
 
     def _is_own_voice(self, text: str) -> bool:
         """Did the mic pick up Vesper's own speech coming out of the speakers?"""
@@ -983,7 +1003,25 @@ class Conversation:
         """One full turn: ask Claude, speak the answer as it arrives."""
         self._maybe_learn(text)
         self.turns += 1
-        self._run_turn(frame_turn(text, sensors.context_block()))
+
+        # Repeating yourself is the clearest available evidence that the last
+        # answer was not the one you wanted. Cheaper and truer than trying to
+        # judge the answer, which would mean asking the model to mark its own
+        # work. `BrainError` is the other half, recorded in `_run_turn`.
+        if self._repeats_the_last_question(text):
+            self.register.note_failure()
+        self._last_asked = text
+        # One snapshot, used twice: the readings ride along as context, and the
+        # register turns the same readings into how this turn should be pitched.
+        # Taking it once matters, because `take()` reads the window and the
+        # vitals and two calls a turn would disagree with each other.
+        now = sensors.take()
+        self.register.note_idle(now.idle_s)
+        context = register.attach(
+            sensors.context_block(now), self.register.line()
+        )
+        self.register.note_turn(now.window.process)
+        self._run_turn(frame_turn(text, context))
 
     def _run_turn(self, payload: str, granted: ActionRequest | None = None) -> None:
         """Drive one turn end to end: speak it, then ask about anything it was
@@ -1063,6 +1101,7 @@ class Conversation:
                     requests.append(request)
 
             elif isinstance(event, BrainError):
+                self.register.note_failure()
                 self.ui.error(event.message)
                 self._say(event.message)
                 return
@@ -1100,6 +1139,7 @@ class Conversation:
                         spoke_at = spoke_at or time.monotonic()
                         self._say(fallback)
 
+                self.register.note_success()
                 self.ui.answered(
                     event,
                     total_s=time.monotonic() - started,
