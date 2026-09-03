@@ -166,7 +166,14 @@ def test_a_device_being_present_is_not_enough_to_be_trusted(monkeypatch):
     assert stt.transcribe(load_wav("speech_short.wav")).ok
 
 
-def test_an_explicit_cuda_that_cannot_even_build_still_leaves_working_ears(monkeypatch):
+def test_a_cuda_that_cannot_even_build_falls_back_the_same_way(monkeypatch):
+    """Refusing to build and failing the probe are one event to the listener.
+
+    They are two different code paths and they used to log two different
+    sentences, which meant a machine with no card at all (a CI runner, say)
+    took the branch nobody had written the message for. Whoever is talking to
+    Vesper does not care which half failed, only that it is on the cpu now.
+    """
     from vesper.stt import accel, whisper as whisper_module
 
     real_build = whisper_module.Listener._build
@@ -178,9 +185,27 @@ def test_an_explicit_cuda_that_cannot_even_build_still_leaves_working_ears(monke
 
     monkeypatch.setattr(whisper_module.Listener, "_build", refuse_cuda)
     monkeypatch.setattr(accel, "device_count", lambda: 1)
-    stt = Listener(WhisperConfig(model="tiny.en", device="cuda"), log=lambda m: None)
+    logged: list[str] = []
+    stt = Listener(WhisperConfig(model="tiny.en", device="cuda"), log=logged.append)
     stt.load()
     assert stt.resolved_device == "cpu"
+    assert any("cuda unusable" in line and "falling back to cpu" in line
+               for line in logged), logged
+    # And the fallback never carries the failed device's precision with it.
+    assert stt.resolved_compute == "int8"
+
+
+def test_a_cpu_model_that_will_not_build_is_a_real_failure(monkeypatch):
+    """There is nowhere to fall back to, so it must not be swallowed."""
+    from vesper.stt import whisper as whisper_module
+
+    def always_fail(self, device, compute):
+        raise RuntimeError("no model files")
+
+    monkeypatch.setattr(whisper_module.Listener, "_build", always_fail)
+    stt = Listener(WhisperConfig(model="tiny.en", device="cpu"), log=lambda m: None)
+    with pytest.raises(RuntimeError, match="no model files"):
+        stt.load()
 
 
 def test_one_failed_transcription_does_not_end_the_assistant(monkeypatch):
@@ -235,3 +260,41 @@ def test_the_cuda_dll_search_is_idempotent():
     second = accel.enable_dll_search()
     assert first == second
     assert os.environ["PATH"] == before, "PATH must not grow on every call"
+
+
+def test_a_gpu_that_never_answers_is_treated_as_unusable():
+    """A broken CUDA install does not reliably raise.
+
+    A half uninstalled one was seen sitting inside `encode` rather than failing,
+    and a startup that hangs is worse than the failure the probe exists to
+    catch: an assistant launched from a login shortcut that never comes up, with
+    nothing on screen to say why.
+    """
+    import time
+
+    from vesper.stt import accel
+
+    class NeverReturns:
+        def transcribe(self, *args, **kwargs):
+            time.sleep(30)
+            return iter(()), None
+
+    started = time.monotonic()
+    problem = accel.probe(NeverReturns(), timeout_s=0.5)
+    assert "did not answer" in problem
+    assert time.monotonic() - started < 5, "the probe must not wait it out"
+
+
+def test_a_working_model_probes_clean_and_a_broken_one_reports_why():
+    from vesper.stt import accel
+
+    class Works:
+        def transcribe(self, *args, **kwargs):
+            return iter(()), None
+
+    class Broken:
+        def transcribe(self, *args, **kwargs):
+            raise RuntimeError("Library cublas64_12.dll is not found")
+
+    assert accel.probe(Works()) == ""
+    assert "cublas64_12" in accel.probe(Broken())

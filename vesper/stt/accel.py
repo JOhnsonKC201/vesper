@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import site
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +43,10 @@ import numpy as np
 # sentence.
 _PROBE_SECONDS = 1.0
 _PROBE_RATE = 16_000
+# Generous: the first inference in a process compiles kernels, and on a cold
+# kernel cache that was measured at 26s once before settling to 0.26s. Long
+# enough never to fail a working card, short enough to be survivable.
+_PROBE_TIMEOUT_S = 60.0
 
 _search_paths_added: list[str] = []
 
@@ -142,20 +147,38 @@ def best_compute_type(device: str) -> str:
     return "float32"
 
 
-def probe(model) -> str:
+def probe(model, timeout_s: float = _PROBE_TIMEOUT_S) -> str:
     """Run one real inference. Returns "" if the GPU works, else why not.
 
     A loaded model proves nothing. This is the only check that does.
+
+    Bounded in time, and on its own thread, because a broken CUDA install does
+    not reliably raise. A half uninstalled one was observed to sit in `encode`
+    instead of failing, and a startup that hangs is worse than the failure this
+    whole function exists to catch: it is an assistant that never comes up at
+    all, from a login shortcut, with nothing on screen to say why. The thread
+    is a daemon, so one that never returns cannot hold the process open either.
     """
     silence = np.zeros(int(_PROBE_SECONDS * _PROBE_RATE), dtype=np.float32)
-    try:
-        segments, _info = model.transcribe(silence, language="en", beam_size=1)
-        # `transcribe` returns a generator and does no work until it is drawn
-        # from. Consuming it here is the entire point of this function.
-        list(segments)
-    except Exception as exc:
-        return f"{type(exc).__name__}: {exc}"
-    return ""
+    outcome: list[str] = []
+
+    def run() -> None:
+        try:
+            segments, _info = model.transcribe(silence, language="en", beam_size=1)
+            # `transcribe` returns a generator and does no work until it is
+            # drawn from. Consuming it here is the entire point of this.
+            list(segments)
+        except Exception as exc:
+            outcome.append(f"{type(exc).__name__}: {exc}")
+        else:
+            outcome.append("")
+
+    worker = threading.Thread(target=run, daemon=True, name="whisper-gpu-probe")
+    worker.start()
+    worker.join(timeout_s)
+    if not outcome:
+        return f"the gpu did not answer within {timeout_s:.0f}s"
+    return outcome[0]
 
 
 def missing_runtime_hint() -> str:

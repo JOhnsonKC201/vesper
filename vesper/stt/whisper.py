@@ -184,33 +184,35 @@ class Listener:
         if compute == "auto":
             compute = accel.best_compute_type(device)
 
+        if device != "cuda":
+            # Nothing to prove and nowhere to fall back to. A cpu model that
+            # will not build is a real failure and belongs to the caller.
+            self._build(device, compute)
+            return
+
+        # The gpu path. Two different things can go wrong here and they are the
+        # same event to whoever is talking to it: the model may refuse to build
+        # on the device at all, or it may build happily and then raise on the
+        # first inference because the CUDA runtime is not really installed.
+        # Both end in the cpu, so both say the same sentence.
         try:
             self._build(device, compute)
         except Exception as exc:
-            # An explicit `device: cuda` in the config on a machine that cannot
-            # do it is a mistake to report, not a reason to have no ears.
-            if device == "cpu":
-                raise
-            self._log(f"whisper could not build on {device}: {type(exc).__name__}: {exc}")
-            self._build("cpu", accel.best_compute_type("cpu"))
+            problem = f"{type(exc).__name__}: {exc}"
+        else:
+            problem = accel.probe(self._model)
+
+        if not problem:
             return
 
-        # A model that built on the GPU has proved nothing yet. If the runtime
-        # is not really there, every transcription raises instead, and the
-        # first one is the first time you speak to it.
-        if device == "cuda":
-            problem = accel.probe(self._model)
-            if problem:
-                self._log(f"whisper cuda unusable ({problem}), falling back to cpu")
-                hint = accel.missing_runtime_hint()
-                if hint:
-                    self._log(f"whisper: {hint}")
-                self._build(
-                    "cpu",
-                    accel.best_compute_type("cpu")
-                    if self.config.compute_type == "auto"
-                    else self.config.compute_type,
-                )
+        self._log(f"whisper cuda unusable ({problem}), falling back to cpu")
+        hint = accel.missing_runtime_hint()
+        if hint:
+            self._log(f"whisper: {hint}")
+        # Always the cpu's own best type, never the configured one. Whatever
+        # `compute` was, it was chosen for the device that just failed, and
+        # float16 on a processor does not load.
+        self._build("cpu", accel.best_compute_type("cpu"))
 
     def _build(self, device: str, compute: str) -> None:
         """Construct the model on one device and record what actually happened."""
