@@ -1,0 +1,126 @@
+# Starter task set for Experiment 1. REPLACE THESE WITH YOUR 15.
+#
+# These exist so the harness is runnable today, and so the shape of a task is
+# obvious before you write your own. Every one is non-destructive and every one
+# carries an objective `check`, because the runner refuses to load a task it
+# cannot score against the world.
+#
+# check kinds:
+#   file_exists     {kind, path}          the path is there afterwards
+#   file_contains   {kind, path, text}    the file holds that text
+#   window_contains {kind, text}          the foreground window title matches
+#   element_named   {kind, text}          a control with that name is on screen
+#   manual          {kind}                never auto-passes; you score it
+#
+# The `script` list is only read with --scripted, which replays fixed actions
+# instead of asking a model. Running the same script under all three modes is
+# how you check the harness rather than the planner.
+#
+# 4 of these span two applications on purpose. WindowsWorld (2604.27776) finds
+# 78% of real tasks are multi-app and that every agent tested scores under 21%
+# on them, so a set that is all single-app measures the easy half.
+
+tasks:
+  # --- Notepad, the most objectively checkable app on Windows --------------
+  - id: np-01
+    app: notepad
+    goal: >
+      Open Notepad, type exactly "vasper harness check" and save the file to
+      C:/Vesper/research/var/scratch/np-01.txt
+    reset: {kind: delete_path, path: C:/Vesper/research/var/scratch/np-01.txt}
+    check: {kind: file_contains, path: C:/Vesper/research/var/scratch/np-01.txt, text: vasper harness check}
+
+  - id: np-02
+    app: notepad
+    goal: Open Notepad and bring up its Find bar.
+    # NOT "Find what". That is classic Notepad. Windows 11 replaced the modal
+    # dialog with an inline Find and Replace bar, and the first live run marked
+    # this task failed while the agent had in fact opened it correctly with
+    # ctrl+f. The check was wrong, not the agent. Verified against the real
+    # control tree: the bar contributes "Exit Find and Replace", "Search down",
+    # "Search up" and "Open replace options", and none of them exist until it
+    # is open.
+    check: {kind: element_named, text: Exit Find and Replace}
+
+  # --- File Explorer --------------------------------------------------------
+  - id: ex-01
+    app: explorer
+    goal: Open File Explorer at C:/Vesper/research and show that folder.
+    check: {kind: window_contains, text: research}
+
+  - id: ex-02
+    app: explorer
+    goal: >
+      Using File Explorer, create a new folder called harness-01 inside
+      C:/Vesper/research/var/scratch
+    reset: {kind: delete_path, path: C:/Vesper/research/var/scratch/harness-01}
+    check: {kind: file_exists, path: C:/Vesper/research/var/scratch/harness-01}
+
+  - id: ex-03
+    app: explorer
+    goal: Open File Explorer and switch it to the Details view.
+    check: {kind: manual}
+
+  # --- Chrome ---------------------------------------------------------------
+  - id: ch-01
+    app: chrome
+    goal: Open Chrome and navigate to example.com
+    check: {kind: window_contains, text: Example}
+
+  - id: ch-02
+    app: chrome
+    goal: In Chrome, open a new tab and go to arxiv.org/abs/2402.07939
+    check: {kind: window_contains, text: UFO}
+
+  - id: ch-03
+    app: chrome
+    goal: Open Chrome's downloads page.
+    check: {kind: window_contains, text: Downloads}
+
+  # --- VS Code --------------------------------------------------------------
+  - id: vs-01
+    app: vscode
+    goal: Open VS Code with the folder C:/Vesper/research
+    check: {kind: window_contains, text: research}
+
+  - id: vs-02
+    app: vscode
+    goal: In VS Code, open the command palette.
+    check: {kind: manual}
+
+  - id: vs-03
+    app: vscode
+    goal: >
+      In VS Code, open C:/Vesper/research/config.yaml so it is the active
+      editor tab.
+    check: {kind: window_contains, text: config.yaml}
+
+  # --- Spotify, the custom-drawn surface UIA is expected to struggle with ---
+  - id: sp-01
+    app: spotify
+    goal: Open Spotify and bring up the Search view.
+    check: {kind: manual}
+
+  # --- multi-application, where the real difficulty is ----------------------
+  - id: mx-01
+    app: [notepad, explorer]
+    goal: >
+      Create C:/Vesper/research/var/scratch/mx-01.txt in Notepad containing the
+      word handoff, then reveal that file in File Explorer.
+    reset: {kind: delete_path, path: C:/Vesper/research/var/scratch/mx-01.txt}
+    check: {kind: file_contains, path: C:/Vesper/research/var/scratch/mx-01.txt, text: handoff}
+
+  - id: mx-02
+    app: [chrome, notepad]
+    goal: >
+      Find the title of arxiv.org/abs/2408.00203 in Chrome, then write that
+      title into C:/Vesper/research/var/scratch/mx-02.txt using Notepad.
+    reset: {kind: delete_path, path: C:/Vesper/research/var/scratch/mx-02.txt}
+    check: {kind: file_contains, path: C:/Vesper/research/var/scratch/mx-02.txt, text: OmniParser}
+
+  - id: mx-03
+    app: [explorer, vscode]
+    goal: >
+      Locate C:/Vesper/research/config.yaml in File Explorer and open it in
+      VS Code.
+    check: {kind: window_contains, text: config.yaml}

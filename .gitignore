@@ -11,3 +11,7 @@ htmlcov/
 # Runtime state: downloaded voice models (63MB each), the resumable Claude
 # session id, rendered audio. All machine-local, none of it belongs in git.
 /var/
+
+# Agent tooling session state, written into whatever directory a command was
+# run from. Machine-local, never part of the project.
+.claude-flow/

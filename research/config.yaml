@@ -1,0 +1,50 @@
+# One yaml for the whole experiment, per the brief.
+#
+# Anything that changes what gets measured lives here rather than in a flag, so
+# a run can be reproduced from this file plus the task list and nothing else.
+# The run id, the trace and the report all land under output.dir.
+
+experiment:
+  # The three arms of Experiment 1. Cut this list to run one at a time.
+  modes: [uia, vision, both]
+
+planner:
+  # Held identical across all three modes. Changing it invalidates any
+  # comparison against an earlier run, so bump the report name if you do.
+  executable: claude
+  model: sonnet
+  timeout_s: 90.0
+
+loop:
+  # WindowsWorld's finding is that agents stall at early sub-goals rather than
+  # running long, so a generous step budget costs little and removes "it ran
+  # out of room" as an explanation for a failure.
+  max_steps: 20
+  # Caps on the observation. Both are correctness limits, not tuning: an
+  # uncapped UIA walk of a browser can take minutes, and a planner handed ten
+  # thousand elements is being tested on context length, not on grounding.
+  max_elements: 200
+  max_depth: 12
+  # How long to let the screen settle after an action before looking again.
+  # Too small and the agent plans against the frame before its own click.
+  settle_s: 0.4
+
+vision:
+  # OmniParser weights (arXiv 2408.00203). Absent by default: modes `vision`
+  # and `both` will report that they saw nothing rather than quietly falling
+  # back to something cheaper and scoring it as if the mode had run.
+  #
+  #   pip install ultralytics
+  #   huggingface-cli download microsoft/OmniParser-v2.0 --local-dir var/omniparser
+  #   weights: var/omniparser/icon_detect/model.pt
+  weights: null
+  box_threshold: 0.05
+
+guard:
+  # The guard refuses everything destructive when no confirmer is wired, which
+  # is the case for every unattended run. Left here as documentation: turning
+  # it off is not a config option on purpose.
+  unattended: refuse
+
+output:
+  dir: var
