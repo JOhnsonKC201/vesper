@@ -198,3 +198,22 @@ def test_tool_detail_extraction(tool_input, expected):
     })
     tools = of_type(parse_all([frame]), ToolStarted)
     assert tools[0].detail == expected
+
+
+def test_a_dead_login_is_named_by_code_and_subtype_and_does_not_leak():
+    """The frames recorded on 2026-09-04, then a normal turn after them."""
+    auth = "Failed to authenticate: OAuth session expired and could not be refreshed"
+    events = parse_all([
+        '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text",'
+        '"text":"' + auth + '"}]},"error":"authentication_failed","isApiErrorMessage":true}',
+        '{"type":"result","subtype":"error_during_execution","is_error":true,'
+        '"result":"' + auth + '","session_id":"s","usage":{}}',
+        '{"type":"result","subtype":"success","is_error":false,"result":"fine",'
+        '"session_id":"s","usage":{}}',
+    ])
+    first, second = of_type(events, TurnComplete)
+    assert first.is_error is True
+    assert first.text == auth
+    assert first.api_error == "authentication_failed"
+    assert first.error_subtype == "error_during_execution"
+    assert (second.is_error, second.api_error, second.error_subtype) == (False, "", "")
