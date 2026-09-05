@@ -301,6 +301,17 @@ leave the request unapproved, and it expires after `consent.window_s` so a yes
 meant for something else cannot land on a stale request. Every outcome is
 appended to `var/actions.log`, since spoken consent leaves no other trace.
 
+A "yes but" is its own answer, `QUALIFIED`, and it is not a refusal. On
+2026-09-05 "Sure, do it, but in front of me" was read as a no, the refusal note
+told Claude never to try again, and four more "do it"s were turned down with
+"I don't relitigate a refusal". Now the question stays open, Vesper says it only
+acts on a plain answer (in words that avoid "yes", "no" and its own name, or
+the echo filter would discard the reply it is asking for), and when the plain
+yes comes the condition rides along in the approved note as an instruction
+about how. The refusal note itself now says what it always meant: no going
+around a refusal on Vesper's own initiative, but a user who asks again later
+gets asked again.
+
 One consequence worth knowing: the persona has to tell Claude to *attempt* the
 action rather than announce it. An earlier wording ("say what you want to do")
 produced a turn where it described the write in prose without calling the tool,

@@ -71,14 +71,22 @@ _WORD = re.compile(r"[a-z']+")
 YES = "yes"
 NO = "no"
 UNCLEAR = "unclear"
+# A yes with a condition hanging off it: "sure, do it, but in front of me".
+# Not consent, because half an agreement must never run the action, and not a
+# refusal either. On 2026-09-05 it was treated as NO, the refusal note told
+# Claude never to try again, and the rest of the evening was Vesper refusing
+# the thing the user had just agreed to. The caller keeps the question open,
+# keeps the condition, and asks for a plain answer.
+QUALIFIED = "qualified"
 
 
 def hear_answer(text: str) -> str:
     """Classify a spoken reply to a yes-or-no question.
 
-    Returns YES, NO or UNCLEAR. Unclear is the load-bearing one: it means the
-    person said something else entirely, and the caller must treat that as a new
-    question rather than as consent. Silence and mumbling never approve.
+    Returns YES, NO, QUALIFIED or UNCLEAR. Unclear is the load-bearing one: it
+    means the person said something else entirely, and the caller must treat
+    that as a new question rather than as consent. Silence and mumbling never
+    approve, and neither does a yes that carries a "but".
     """
     if not text:
         return UNCLEAR
@@ -98,9 +106,17 @@ def hear_answer(text: str) -> str:
     # meant they neither declined nor told Claude to drop the idea.
     if any(word in _DECISIVE_NO for word in words):
         return NO
-    if "but" in words[:4] and any(w in _DECISIVE_YES for w in words[:2]):
-        # "yes but leave the second one" is a conversation, not a green light.
-        return NO
+    if "but" in words:
+        # "yes but leave the second one" is a conversation, not a green light,
+        # and "sure, do it, but in front of me" is a yes the person wants
+        # heard. Everything before the "but" has to be agreement for this to be
+        # the second kind; otherwise it is a sentence about something else.
+        head = words[: words.index("but")]
+        agreed = bool(head) and all(w in _AGREEMENT_WORDS or w in _FILLER for w in head)
+        # "okay" and "ok" are fillers when they lead into something else and a
+        # yes when they stand alone, so the yes check reads the raw head.
+        if agreed and any(w in _DECISIVE_YES or w in _YES for w in head):
+            return QUALIFIED
 
     trimmed = list(words)
     while len(trimmed) > 1 and trimmed[0] in _FILLER:

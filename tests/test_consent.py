@@ -14,7 +14,9 @@ import pytest
 
 from vesper import audit, config as config_module
 from vesper.brain.claude import BrainConfig
-from vesper.brain.consent import NO, UNCLEAR, YES, ActionRequest, _verbs, hear_answer
+from vesper.brain.consent import (
+    NO, QUALIFIED, UNCLEAR, YES, ActionRequest, _verbs, hear_answer,
+)
 from vesper.brain.persona import is_refusal_noise
 from vesper.brain.protocol import (
     PermissionNeeded,
@@ -62,11 +64,27 @@ def test_anything_that_is_not_an_answer_is_unclear(said):
     assert hear_answer(said) == UNCLEAR
 
 
-def test_a_qualified_yes_is_not_a_yes():
-    """"Yes but" is a conversation, not permission. Treated as a refusal,
-    because acting on half an agreement is worse than asking again."""
-    assert hear_answer("yes but not the config file") == NO
-    assert hear_answer("yeah but wait") == NO
+@pytest.mark.parametrize(
+    "said",
+    ["yes but not the config file", "yeah but wait",
+     "Sure, do it, but in front of me.", "okay but only this once"],
+)
+def test_a_qualified_yes_is_neither_a_yes_nor_a_no(said):
+    """"Yes but" is a conversation, not permission, so it must not act. It
+    used to be treated as a refusal, and on 2026-09-05 the third example was:
+    the refusal note then made the thing untouchable for the evening. Now it
+    is its own answer, and the conversation asks for a plain one."""
+    assert hear_answer(said) == QUALIFIED
+
+
+def test_a_but_with_a_refusal_in_it_still_refuses():
+    assert hear_answer("yes but don't touch the config") == NO
+    assert hear_answer("sure but no") == NO
+
+
+def test_a_but_that_is_not_preceded_by_agreement_is_unclear():
+    """"The weather is nice but cold" is not an answer at all."""
+    assert hear_answer("the weather is nice but cold") == UNCLEAR
 
 
 # --- what a yes buys --------------------------------------------------------
@@ -409,6 +427,44 @@ def test_a_spoken_yes_grants_exactly_that_action_and_hands_it_back():
     assert conv._pending is None
     assert conv.approvals == 1
     assert ("approved", "Bash: git commit -m wip") in ui.decisions
+
+
+def test_a_yes_with_a_condition_keeps_the_question_open_and_carries_the_condition():
+    """Verbatim from 2026-09-05: the answer to "do I search the web for you"
+    was "Sure, do it, but in front of me." It was declined, Claude was told
+    never to try again, and four more "do it"s were refused. Now it approves
+    nothing, refuses nothing, asks for a plain answer, and the condition
+    reaches Claude with the plain yes."""
+    brain = DenyingBrain(
+        request_tool="Bash", request_input={"command": "git commit -m wip"}
+    )
+    conv, speaker, ui, voice = _build(
+        brain, ["Vesper commit that", "Vesper, sure, do it, but in front of me.", "Vesper yes"]
+    )
+    conv._on_utterance(_audio())   # refused, Vesper asks
+    conv._on_utterance(_audio())   # a yes with a condition
+    _settle(speaker)
+
+    assert conv._pending is not None, "the question must stay open"
+    assert conv.approvals == 0 and conv.refusals == 0
+    assert brain.grant_history == []
+    assert not any("Permission refused" in note for note in brain.notes)
+    re_ask = voice.lines[-1].lower()
+    assert "condition" in re_ask
+    # The re-ask must not contain the very words it is asking for, or the echo
+    # filter throws the answer away as Vesper hearing itself.
+    assert not any(word in re_ask.split() for word in ("yes", "no", "it", "vesper"))
+
+    conv._on_utterance(_audio())   # "Vesper, yes"
+    _settle(speaker)
+    speaker.close()
+
+    assert conv.approvals == 1
+    assert brain.grant_history == [("Bash(git commit:*)",)]
+    approved_note = brain.asked[-1]
+    assert "Permission granted" in approved_note
+    assert "in front of me" in approved_note
+    assert conv._pending_condition == ""
 
 
 def test_a_spoken_no_grants_nothing():
