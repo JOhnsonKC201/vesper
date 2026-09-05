@@ -243,6 +243,18 @@ def cmd_focus(args) -> int:
               "front from the background. it is still open, and clicking it "
               "once will do it.")
         return 1
+    # Check rather than trust. The call above rarely raises even when Windows
+    # ignores it, and on 2026-09-05 that read as "focused LinkedIn" while the
+    # terminal stayed on top, so the brain went on to describe a screenshot of
+    # the wrong window. Polled briefly, because the switch is not instant.
+    deadline = time.time() + 0.4
+    while win32gui.GetForegroundWindow() != window.handle:
+        if time.time() >= deadline:
+            front = win32gui.GetWindowText(win32gui.GetForegroundWindow()) or "another window"
+            print(f"{_safe_title(window.title)!r} is open, but windows kept "
+                  f"{_safe_title(front)!r} in front. clicking it once will do it.")
+            return 1
+        time.sleep(0.05)
     print(f"focused {_safe_title(window.title)}")
     return 0
 
