@@ -70,14 +70,16 @@ brain:
     - "Bash(date:*)"
     - "Bash(whoami:*)"
     - "Bash(hostname:*)"
-    # Vasper's own hands (vesper/tool.py). Looking, plus the two changes
-    # that are only ever visible ones: launching a Start Menu entry and
-    # moving focus. Clicking and typing are deliberately NOT here, because
-    # a click can press Send and typing can write anything into anything;
-    # both go through the spoken gate instead.
+    # Vasper's eyes (vesper/tool.py): windows, apps, screenshot and look read
+    # and change nothing. Plus the two changes that are only ever visible
+    # ones: launching a Start Menu entry and moving focus. Clicking, typing,
+    # keys and scrolling are deliberately NOT here, because a click can press
+    # Send and typing can write anything into anything; they go through the
+    # spoken gate, one "use the mouse and keyboard" yes per turn.
     - "Bash(vasper windows:*)"
     - "Bash(vasper apps:*)"
     - "Bash(vasper screenshot:*)"
+    - "Bash(vasper look:*)"
     - "Bash(vasper focus:*)"
     - "Bash(vasper open:*)"
     - "Bash(ipconfig:*)"

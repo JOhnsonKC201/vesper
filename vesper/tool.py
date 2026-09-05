@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .sensors.window import _SENSITIVE
+from . import hands
 
 ROOT = Path(__file__).resolve().parent.parent
 SHOTS = ROOT / "var" / "shots"
@@ -56,9 +57,33 @@ START_MENUS = (
     Path(os.environ.get("PROGRAMDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
 )
 
-# Below this a "match" is a coincidence. Tuned so "chrome" finds Google Chrome
-# and "asdf" finds nothing rather than the alphabetically nearest thing.
-MATCH_FLOOR = 0.45
+# Below this a "match" is a coincidence. Substring matches never reach this
+# floor; it only decides the fuzzy fallback for typos. It was 0.45, and at 0.45
+# "notepad" scored 0.57 against "OneNote" and launched it, live, in front of
+# the user (2026-09-05). A wrong launch is worse than "nothing matches", so the
+# floor sits where "chorme" still finds Chrome (0.83) and OneNote does not.
+MATCH_FLOOR = 0.66
+
+
+@dataclass(frozen=True)
+class App:
+    """Something Windows will launch by name: a Start Menu shortcut, or an
+    installed app the Start menu lists without a shortcut, such as the Store
+    apps Notepad and Calculator are on Windows 11.
+
+    `stem` matches `Path.stem` so the matcher can treat shortcuts and apps the
+    same way; `str()` is what `os.startfile` needs.
+    """
+
+    name: str
+    target: str
+
+    @property
+    def stem(self) -> str:
+        return self.name
+
+    def __str__(self) -> str:
+        return self.target
 
 
 @dataclass(frozen=True)
@@ -136,8 +161,40 @@ def find_window(needle: str) -> Window | None:
 # --- the start menu ---------------------------------------------------------
 
 
-def installed_apps() -> list[Path]:
-    out: list[Path] = []
+def store_apps() -> list[App]:
+    """Every app the Start menu itself lists, from the shell's AppsFolder.
+
+    This is where Windows 11 keeps the apps that have no .lnk anywhere:
+    Notepad, Calculator, Terminal, Photos, and everything from the Store. Each
+    comes with an application user model id, and `shell:AppsFolder\\<id>` is
+    how the Start menu launches it, which is exactly what `vasper open` is
+    allowed to be: the same double click the user could make.
+    """
+    try:
+        import win32com.client
+
+        shell = win32com.client.Dispatch("Shell.Application")
+        items = shell.NameSpace("shell:AppsFolder").Items()
+        apps: list[App] = []
+        for index in range(items.Count):
+            item = items.Item(index)
+            name, path = str(item.Name or "").strip(), str(item.Path or "").strip()
+            if name and path:
+                apps.append(App(name, "shell:AppsFolder\\" + path))
+        return apps
+    except Exception:
+        # No shell COM, or a locked down profile. The Start Menu shortcuts
+        # still work on their own, as they did before this existed.
+        return []
+
+
+def installed_apps() -> list[Path | App]:
+    """Start Menu shortcuts first, then the apps only the AppsFolder knows.
+
+    A shortcut wins over an AppsFolder entry of the same name because the
+    shortcut is the thing the user, or the installer, put there on purpose.
+    """
+    out: list[Path | App] = []
     seen: set[str] = set()
     for menu in START_MENUS:
         if not menu.is_dir():
@@ -147,7 +204,24 @@ def installed_apps() -> list[Path]:
             if key not in seen:
                 seen.add(key)
                 out.append(link)
+    for app in store_apps():
+        key = app.stem.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(app)
     return sorted(out, key=lambda p: p.stem.lower())
+
+
+def _similarity(needle: str, name: str) -> float:
+    """How close a spoken name is to an app name, or to any one word of it.
+
+    Whole-name only, "chorme" scores 0.53 against "google chrome" and a typo
+    stops finding Chrome; word by word it scores 0.83 against "chrome". The
+    per-word view does not rescue "notepad" against "onenote" (0.57), which is
+    the wrong launch the floor exists to prevent.
+    """
+    candidates = [name, *name.split()]
+    return max(difflib.SequenceMatcher(None, needle, c).ratio() for c in candidates)
 
 
 def match_app(name: str) -> tuple[Path | None, list[Path]]:
@@ -165,13 +239,9 @@ def match_app(name: str) -> tuple[Path | None, list[Path]]:
     contains = [a for a in apps if name in a.stem.lower() and a not in starts]
     ranked = starts + contains
     if not ranked:
-        scored = sorted(
-            apps,
-            key=lambda a: difflib.SequenceMatcher(None, name, a.stem.lower()).ratio(),
-            reverse=True,
-        )
+        scored = sorted(apps, key=lambda a: _similarity(name, a.stem.lower()), reverse=True)
         top = scored[0]
-        if difflib.SequenceMatcher(None, name, top.stem.lower()).ratio() < MATCH_FLOOR:
+        if _similarity(name, top.stem.lower()) < MATCH_FLOOR:
             return None, []
         ranked = scored[:4]
     return ranked[0], ranked[1:4]
@@ -211,7 +281,9 @@ def cmd_open(args) -> int:
         print(f"nothing installed matching {args.name!r}")
         return 1
     try:
-        os.startfile(str(best))  # noqa: S606 - a Start Menu shortcut the user asked for
+        # A Start Menu shortcut, or shell:AppsFolder\<id> for an app the Start
+        # menu lists without one. Both are the double click the user could make.
+        os.startfile(str(best))  # noqa: S606
     except OSError as exc:
         print(f"could not open {best.stem}: {exc}")
         return 1
@@ -314,11 +386,190 @@ def _prune_shots(keep: int = 20) -> None:
             pass
 
 
+# --- the hands: look, then act, in front of the user -------------------------
+#
+# Every command below except `look` is refused by the brain's allowlist and
+# becomes the spoken question "use the mouse and keyboard to ...". A yes covers
+# all of them for one turn. Each one is performed so the person can see it
+# coming: the cursor glides to its target before a click, and text is typed a
+# character at a time. That is deliberate. A click that lands from nowhere
+# cannot be stopped; one you watch travel across the screen can.
+
+
+def _front_window() -> tuple[int, str]:
+    import win32gui
+
+    handle = win32gui.GetForegroundWindow()
+    return handle, (win32gui.GetWindowText(handle) if handle else "")
+
+
+def _elements_of(handle: int, limit: int = hands.MAX_ELEMENTS) -> list[hands.Element]:
+    return hands.walk(hands.attach(handle), max_elements=limit)
+
+
+def cmd_look(args) -> int:
+    """What is on the front window, numbered, with where each thing is."""
+    if args.window:
+        window = find_window(args.window)
+        if window is None:
+            print(f"no window matching {args.window!r}")
+            return 1
+        handle, title = window.handle, window.title
+    else:
+        handle, title = _front_window()
+    if not handle:
+        print("no window in front")
+        return 1
+    if _SENSITIVE.search(title):
+        # The same line the window list and the ambient context draw. A
+        # password manager's controls are exactly as revealing as its title.
+        print(f"the window in front is {_safe_title(title)}, and I do not read those")
+        return 1
+    elements = _elements_of(handle, args.max)
+    print(f"window: {title}")
+    if not elements:
+        print("  nothing readable in it, a canvas or a custom drawn surface; "
+              "take a screenshot instead")
+        return 0
+    for element in elements:
+        print("  " + element.describe())
+    return 0
+
+
+def _resolve_target(tokens: list[str]) -> tuple[tuple[int, int] | None, str]:
+    """`X Y` is a point; anything else is the name of a control on the front
+    window, looked up fresh, because positions from an earlier look go stale
+    the moment the window moves."""
+    if len(tokens) == 2 and all(t.lstrip("-").isdigit() for t in tokens):
+        return (int(tokens[0]), int(tokens[1])), f"{tokens[0]},{tokens[1]}"
+    name = " ".join(tokens).strip().strip("\"'")
+    handle, title = _front_window()
+    if not handle:
+        return None, "no window in front"
+    if _SENSITIVE.search(title):
+        return None, f"the window in front is {_safe_title(title)}, and I do not touch those"
+    found, others = hands.find_element(_elements_of(handle), name)
+    if found is not None:
+        return found.center, repr(found.name or found.control_type)
+    if others:
+        listing = "; ".join(e.describe() for e in others)
+        return None, f"{name!r} is ambiguous in {title!r}: {listing}. Click one by its X Y."
+    return None, f"nothing called {name!r} on {title!r}. Run vasper look and pick from the list."
+
+
+def _glide_to(point: tuple[int, int]) -> None:
+    """Move the cursor to the point the way a hand would, so it is seen coming."""
+    import win32api
+
+    for step in hands.glide_path(tuple(win32api.GetCursorPos()), point):
+        win32api.SetCursorPos(step)
+        time.sleep(hands.GLIDE_STEP_MS / 1000.0)
+
+
+def cmd_move(args) -> int:
+    point, label = _resolve_target(args.target)
+    if point is None:
+        print(label)
+        return 1
+    _glide_to(point)
+    print(f"pointing at {label}, {point[0]},{point[1]}")
+    return 0
+
+
+def cmd_click(args) -> int:
+    from pywinauto import mouse
+
+    point, label = _resolve_target(args.target)
+    if point is None:
+        print(label)
+        return 1
+    _glide_to(point)
+    button = "right" if args.right else "left"
+    if args.double:
+        mouse.double_click(button=button, coords=point)
+    else:
+        mouse.click(button=button, coords=point)
+    kind = ("double " if args.double else "") + ("right " if args.right else "")
+    print(f"{kind}clicked {label} at {point[0]},{point[1]}")
+    return 0
+
+
+def cmd_type(args) -> int:
+    """Type where the keyboard focus is, one character at a time."""
+    from pywinauto import keyboard
+
+    text = args.text
+    if not text:
+        print("nothing to type")
+        return 1
+    keyboard.send_keys(
+        hands.escape_text(text), with_spaces=True, with_newlines=True,
+        pause=hands.TYPE_PAUSE_S,
+    )
+    if args.enter:
+        keyboard.send_keys("{ENTER}", pause=hands.TYPE_PAUSE_S)
+    print(f"typed {len(text)} characters" + (" and pressed enter" if args.enter else ""))
+    return 0
+
+
+def cmd_key(args) -> int:
+    from pywinauto import keyboard
+
+    try:
+        keys = hands.to_send_keys(args.combo)
+    except ValueError as exc:
+        print(f"cannot press {args.combo!r}: {exc}")
+        return 1
+    keyboard.send_keys(keys, pause=0.02)
+    print(f"pressed {args.combo}")
+    return 0
+
+
+def cmd_scroll(args) -> int:
+    import win32api
+    from pywinauto import mouse
+
+    notches = max(1, min(int(args.times), 20))
+    distance = notches if args.direction == "up" else -notches
+    mouse.scroll(coords=tuple(win32api.GetCursorPos()), wheel_dist=distance)
+    print(f"scrolled {args.direction} {notches}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vasper", description="Vasper's hands on this machine."
     )
     subs = parser.add_subparsers(dest="command", required=True)
+
+    look = subs.add_parser("look", help="what is on the front window, numbered, with positions")
+    look.add_argument("--window", default="", help="look at this window instead of the front one")
+    look.add_argument("--max", type=int, default=hands.MAX_ELEMENTS)
+    look.set_defaults(run=cmd_look)
+
+    click = subs.add_parser("click", help="glide to a control by name, or to X Y, and click")
+    click.add_argument("target", nargs="+")
+    click.add_argument("--right", action="store_true")
+    click.add_argument("--double", action="store_true")
+    click.set_defaults(run=cmd_click)
+
+    move = subs.add_parser("move", help="point the cursor at a control or X Y without clicking")
+    move.add_argument("target", nargs="+")
+    move.set_defaults(run=cmd_move)
+
+    typer = subs.add_parser("type", help="type text where the focus is, visibly")
+    typer.add_argument("text")
+    typer.add_argument("--enter", action="store_true", help="press enter afterwards")
+    typer.set_defaults(run=cmd_type)
+
+    key = subs.add_parser("key", help="press a key or combination: enter, esc, ctrl+l, alt+f4")
+    key.add_argument("combo")
+    key.set_defaults(run=cmd_key)
+
+    scroll = subs.add_parser("scroll", help="scroll under the cursor")
+    scroll.add_argument("direction", choices=("up", "down"))
+    scroll.add_argument("--times", type=int, default=3)
+    scroll.set_defaults(run=cmd_scroll)
 
     subs.add_parser("windows", help="list visible windows").set_defaults(run=cmd_windows)
 

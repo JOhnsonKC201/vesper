@@ -167,9 +167,45 @@ _INTERPRETERS = {
     "bash", "zsh", "powershell", "pwsh", "cmd", "wscript", "cscript",
 }
 # `vasper` is here so a grant reads `Bash(vasper click:*)` rather than bare
-# `Bash(vasper:*)`. Approving a click must not also buy typing.
+# `Bash(vasper:*)`: approving the hands must not also buy `vasper` verbs that
+# do not exist yet.
 _SUBCOMMAND_TOOLS = {"git", "npm", "pnpm", "yarn", "pip", "winget", "choco",
                      "docker", "gh", "vasper"}
+# The mouse and keyboard, which are granted together, for one turn. A task is
+# "click the address bar, type the search, press enter", and asking three
+# separate questions for it made the hands unusable, while the person is
+# sitting there watching each one happen. So the question is "use the mouse and
+# keyboard to <the first thing>" and a yes covers these five verbs until the
+# turn ends. Nothing else rides on it: `vasper open` stays free and `rm` stays
+# its own question.
+_HAND_VERBS = ("click", "type", "key", "scroll", "move")
+_HAND_SPECS = tuple(f"Bash(vasper {verb}:*)" for verb in _HAND_VERBS)
+
+
+def _is_hand(verb: str) -> bool:
+    parts = verb.split()
+    return len(parts) == 2 and parts[0] == "vasper" and parts[1] in _HAND_VERBS
+
+
+def _describe_hand(command: str) -> str:
+    """The first hand action in a shell line, as a person would say it."""
+    for part in _CHAIN.split(command.strip()):
+        tokens = part.strip().split()
+        if len(tokens) < 2 or tokens[0].split("/")[-1].lower() != "vasper":
+            continue
+        verb = tokens[1].lower()
+        rest = " ".join(t for t in tokens[2:] if not t.startswith("--")).strip("\"'")
+        words = " ".join(rest.split()[:6])
+        if verb in ("click", "move"):
+            what = "at " + words if all(w.lstrip("-").isdigit() for w in rest.split()) and rest else words
+            return f"{verb} {what}".strip() if what else verb
+        if verb == "type":
+            return f"type {words}" if words else "type"
+        if verb == "key":
+            return "press " + words.replace("+", " ") if words else "press a key"
+        if verb == "scroll":
+            return f"scroll {words}".strip()
+    return "click and type"
 # A verb carrying shell punctuation is a parse failure, not a verb. One such
 # produced the allowlist spec `Bash(y):*)` from a curl of a url ending in /y.
 _CLEAN_VERB = re.compile(r"^[A-Za-z0-9_.+-]+(?: [A-Za-z0-9_.+-]+)?$")
@@ -298,6 +334,11 @@ class ActionRequest:
                 return "run a command I can't read well enough to describe"
             if len(verbs) > MAX_VERBS:
                 return f"run {len(verbs)} separate commands in one line"
+            if all(_is_hand(v) for v in verbs):
+                # The grant is all five hand verbs for this turn, so the
+                # question names the mouse and keyboard, not one verb.
+                command = str(self.tool_input.get("command") or "")
+                return f"use the mouse and keyboard to {_describe_hand(command)}"
             spoken = " and ".join(verbs) if len(verbs) < 3 else (
                 ", then ".join(verbs[:-1]) + ", and " + verbs[-1]
             )
@@ -341,6 +382,16 @@ class ActionRequest:
         """
         return self.tool != "Bash"
 
+    @property
+    def is_hands(self) -> bool:
+        """Is this the mouse and keyboard, granted together for the turn?
+
+        The approval note differs: "do exactly this one action" is right for a
+        commit and wrong for the hands, where the approved thing is the task
+        and it takes several clicks and keystrokes to do.
+        """
+        return self.grants() == _HAND_SPECS
+
     def grants(self) -> tuple[str, ...]:
         """The narrowest allowlist specs that let exactly this through.
 
@@ -362,6 +413,13 @@ class ActionRequest:
             # permission.
             if not verbs or len(verbs) > MAX_VERBS:
                 return ()
+            if any(_is_hand(v) for v in verbs) and not all(_is_hand(v) for v in verbs):
+                # A hand action chained with something else is two different
+                # questions in one line. Refused rather than described, the
+                # same as a line with too many verbs.
+                return ()
+            if all(_is_hand(v) for v in verbs):
+                return _HAND_SPECS
             return tuple(f"Bash({verb}:*)" for verb in verbs)
         return (self.tool,)
 

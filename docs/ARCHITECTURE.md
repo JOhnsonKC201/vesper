@@ -296,6 +296,20 @@ it to the next question would have been simpler and wrong: the ambient loop
 shares this brain, and an unattended proactive turn could inherit permission
 given for something else entirely.
 
+**Except the hands, which are one grant.** `vasper click`, `type`, `key`,
+`scroll` and `move` are granted together for one turn by a single question that
+names what it buys: "use the mouse and keyboard to click Search". The earlier
+rule, one verb per grant so a click cannot buy typing, made the hands unusable:
+a task is click the address bar, type, press enter, and three spoken questions
+for it while the person watches each action land is not consent, it is
+friction. What keeps this honest is the same as everywhere else: the question
+says "mouse and keyboard", the grant lasts one turn, `vasper open` and every
+other verb stay outside it, and a hand action chained with anything else in
+one shell line is refused rather than described. The actions themselves are
+built to be watched: the cursor glides to its target over a third of a second
+before a click, and text is typed a character at a time (`vesper/hands.py`,
+`GLIDE_MS` and `TYPE_PAUSE_S`).
+
 **Only a yes approves.** Silence, an unrelated question and a "yes but" all
 leave the request unapproved, and it expires after `consent.window_s` so a yes
 meant for something else cannot land on a stale request. Every outcome is

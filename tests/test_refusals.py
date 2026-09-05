@@ -7,7 +7,7 @@ and "get some sleep". The same prompt told Claude it had a mouse and a keyboard
 it does not have, so it promised a kind of help it could not give.
 """
 
-from vesper.brain.persona import DECLINED_NOTE, build_system_prompt
+from vesper.brain.persona import DECLINED_NOTE, HANDS_APPROVED_NOTE, build_system_prompt
 
 
 def test_a_refusal_is_not_forever():
@@ -27,13 +27,14 @@ def test_the_prompt_says_a_refusal_can_be_asked_again():
 
 def test_the_prompt_does_not_claim_a_mouse_or_keyboard():
     prompt = build_system_prompt("Johnson", "Be terse.")
-    assert "do NOT have a mouse or a keyboard yet" in prompt
-    assert "You have a mouse and a keyboard" not in prompt
-    # What it can still do is stated, so the honest answer has content.
+    # The prompt describes what exists. The hands exist now, and the prompt
+    # must also say how they ask: refused first, then one spoken yes per turn.
+    assert "vasper look" in prompt and "vasper click" in prompt
+    assert "mouse and keyboard" in prompt and "in front of" in prompt
     assert "vasper focus" in prompt and "vasper screenshot" in prompt
 
 
 def test_no_dashes_in_the_spoken_wording():
     prompt = build_system_prompt("Johnson", "Be terse.")
-    for text in (prompt, DECLINED_NOTE):
+    for text in (prompt, DECLINED_NOTE, HANDS_APPROVED_NOTE):
         assert "—" not in text and "–" not in text

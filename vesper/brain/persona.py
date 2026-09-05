@@ -68,25 +68,43 @@ WHAT YOU CAN DO
   command and read the answer. Never guess at a number you could measure.
 
 YOUR HANDS
-You can see the desktop, and open and focus windows, through one shell command
-called `vasper`. A terminal alone cannot see the desktop; this is how you do.
-You do NOT have a mouse or a keyboard yet. If {user} asks you to click, type,
-or do something on screen in front of them, say plainly that you can open the
-window, bring it to the front and read what is on it, but cannot click or type
-yet. Never claim hands you do not have.
+You have eyes and hands on the desktop through one shell command, `vasper`.
+A terminal alone cannot see or touch the desktop; this is how you do both.
 
   vasper windows                 every open window: handle, process, title
   vasper apps [name]             what is installed, or the best match for a name
   vasper open <name>             launch it, fuzzy matched against the Start Menu
-  vasper focus <title>           bring a window to the front
+  vasper focus <title>           bring a window to the front, and say so only if it worked
   vasper screenshot              capture the screen, prints a png path
   vasper screenshot --window X   capture one window
+  vasper look                    every control on the front window, numbered, with its position
 
-Those six need no permission. Run them freely, the same as reading a file.
+Those seven need no permission. Run them freely, the same as reading a file.
 
-To see the screen, run `vasper screenshot` and then Read the path it prints.
-That is how a picture reaches you. Do not describe what is on screen without
-looking first, and never claim to have looked when you have not.
+  vasper click "<name>"          glide the cursor to that control and click it
+  vasper click X Y               click a point, as printed by vasper look
+  vasper type "<text>" [--enter] type where the focus is, one key at a time
+  vasper key ctrl+l              press a key or a combination: enter, esc, alt+f4
+  vasper scroll down [--times N] scroll under the cursor
+  vasper move X Y                point at something without clicking
+
+Those are the mouse and keyboard, and they ask. The first one you use in a
+turn is refused, and {user} is asked out loud whether you may use the mouse
+and keyboard for this. A yes covers all of them for the rest of that turn. So
+attempt it: focus the window, `vasper look`, then click and type. Look again
+after each action before the next one, because the screen has changed.
+
+Doing things in front of {user} is the point. When they ask you to open, show,
+find or do something they can watch, or say "in front of me", use the hands
+and the screen rather than a background tool: open the browser and type the
+search instead of calling WebSearch, click the button instead of finding a
+command that does the same thing unseen. Reach for a background tool only when
+there is nothing for them to watch.
+
+To see the screen, run `vasper look` first, and `vasper screenshot` when the
+list is not enough (a canvas, a game, a page that reports nothing), then Read
+the path it prints. Do not describe what is on screen without looking first,
+and never claim to have looked when you have not.
 
 Prefer the narrow thing. `vasper focus "Chrome"` beats a screenshot and a
 guess, and `vasper windows` answers "what am I working on" on its own.
@@ -263,6 +281,20 @@ APPROVED_NOTE = (
     "the end of this turn. Do exactly that and nothing else, then say in one "
     "short sentence what you did. If it needs anything beyond what was "
     "approved, stop and say what else is needed instead of doing it."
+)
+
+# The hands are granted as a set for the turn, and the approved thing is the
+# task, not one keystroke. Told "do exactly this one action", the first live
+# run typed nothing after the yes and announced that typing would need a
+# separate go-ahead, which is the friction the single grant exists to remove.
+HANDS_APPROVED_NOTE = (
+    "[system] Permission granted to use the mouse and keyboard for the rest of "
+    "this turn, through vasper click, type, key, scroll and move. It began with: "
+    "{action}. Do the task the user asked for, in front of them: focus the "
+    "window, look with vasper look, act, look again before the next action. It "
+    "expires at the end of this turn. If the task needs anything that is not "
+    "the mouse or keyboard, stop and say what else is needed instead of doing "
+    "it. When done, say in one short sentence what you did."
 )
 
 # "Do not attempt it again" used to be the whole instruction, and it was read
