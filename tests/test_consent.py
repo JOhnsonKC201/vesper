@@ -15,7 +15,8 @@ import pytest
 from vesper import audit, config as config_module
 from vesper.brain.claude import BrainConfig
 from vesper.brain.consent import (
-    NO, QUALIFIED, UNCLEAR, YES, ActionRequest, _verbs, hear_answer,
+    NO, QUALIFIED, UNCLEAR, YES, ActionRequest, _verbs, asked_for_hands, hear_answer,
+    request_after_refusal,
 )
 from vesper.brain.persona import is_refusal_noise
 from vesper.brain.protocol import (
@@ -570,7 +571,10 @@ def test_a_yes_to_the_hands_grants_the_set_and_says_the_task_is_the_unit():
     brain = DenyingBrain(
         request_tool="Bash", request_input={"command": 'vasper type "hello from vasper"'}
     )
-    conv, speaker, ui, voice = _build(brain, ["Vesper type hello in it", "Vesper yes"])
+    # "Put hello in that note" does not name a hand action itself, so this is
+    # Vesper's own idea to type and it asks; "type hello in it" would be the
+    # user's request and would need no question (see the asked-for tests).
+    conv, speaker, ui, voice = _build(brain, ["Vesper put hello in that note", "Vesper yes"])
     conv._on_utterance(_audio())
     _settle(speaker)
     assert voice.lines[-1] == (
@@ -589,6 +593,102 @@ def test_a_yes_to_the_hands_grants_the_set_and_says_the_task_is_the_unit():
     assert "mouse and keyboard for the rest of this turn" in note
     assert "look again before the next action" in note
     assert "this one action" not in note
+
+
+@pytest.mark.parametrize("said", [
+    "click on the LinkedIn tab",
+    "So click on the LinkedIn.",
+    "Vesper, double click the file",
+    "type hello in it",
+    'type "weather baltimore" into the address bar',
+    "press enter",
+    "scroll down a bit",
+    "switch to the LinkedIn tab",
+    "select the second tab",
+    "can you click on the Inbox tab",
+])
+def test_a_request_that_names_a_hand_action_is_the_yes(said):
+    assert asked_for_hands(said), said
+
+
+@pytest.mark.parametrize("said", [
+    "Can you be able to click when I ask?",
+    "what type of GPU do I have",
+    "don't click anything",
+    "how do I click on it",
+    "the weather is nice",
+    "what time is it",
+    "look up tomorrow's weather in chrome",
+])
+def test_a_question_about_the_hands_or_anything_else_is_not_a_request(said):
+    assert not asked_for_hands(said), said
+
+
+def test_the_instruction_riding_on_a_no_is_kept():
+    assert request_after_refusal("No, no, click on the LinkedIn tab.") == "click on the linkedin tab"
+    assert request_after_refusal("no thanks") == ""
+    assert request_after_refusal("no, leave it alone") == ""
+    assert request_after_refusal("nope") == ""
+
+
+def test_asking_for_the_click_yourself_needs_no_second_question(tmp_path):
+    """2026-09-05 01:44: "click on the LinkedIn tab" got the question "click
+    at 2979 20?" back. The request is the consent: the hands are granted for
+    that turn, written down as asked for, and handed back afterwards."""
+    log = tmp_path / "actions.log"
+    brain = FakeBrain(["Switched to the LinkedIn tab."])
+    conv, speaker, ui, voice = _build(brain, ["Vesper click on the LinkedIn tab"], audit_log=log)
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    speaker.close()
+
+    assert voice.lines == ["Switched to the LinkedIn tab."], "no question was asked"
+    assert conv._pending is None
+    assert brain.grant_history == [tuple(
+        f"Bash(vasper {v}:*)" for v in ("click", "type", "key", "scroll", "move")
+    )]
+    assert brain.revoked and brain.grants == ()
+    assert brain.asked[0].startswith("[system] The user's request below asks for a click")
+    assert "click on the LinkedIn tab" in brain.asked[0]
+    assert ("asked-for", "hands: click on the LinkedIn tab") in ui.decisions
+    assert "asked-for" in log.read_text(encoding="utf-8")
+
+
+def test_a_read_question_grants_no_hands():
+    brain = FakeBrain(["Sixteen cores."])
+    conv, speaker, ui, voice = _build(brain, ["Vesper what type of GPU do I have"])
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    speaker.close()
+    assert brain.grant_history == []
+    assert voice.lines == ["Sixteen cores."]
+
+
+def test_a_no_with_an_instruction_declines_and_then_does_the_instruction():
+    """The exact exchange: a question about a click, answered "No, no, click on
+    the LinkedIn tab." The no declines that question; the rest is a new
+    request, which itself asks for the click, so it runs with the hands."""
+    brain = DenyingBrain(
+        request_tool="Bash", request_input={"command": "vasper click 2979 20"},
+        replies=["Waiting on you.", "Switched to the LinkedIn tab."],
+    )
+    conv, speaker, ui, voice = _build(
+        brain, ["Vesper open the LinkedIn tab", "Vesper, no, no, click on the LinkedIn tab."]
+    )
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    assert conv._pending is not None
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    speaker.close()
+
+    assert conv.refusals == 1
+    assert any("Permission refused" in note for note in brain.notes)
+    assert brain.grant_history == [tuple(
+        f"Bash(vasper {v}:*)" for v in ("click", "type", "key", "scroll", "move")
+    )]
+    assert "click on the linkedin tab" in brain.asked[-1]
+    assert voice.lines[-1] == "Switched to the LinkedIn tab."
 
 
 def test_every_decision_is_written_down(tmp_path):

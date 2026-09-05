@@ -182,6 +182,57 @@ _HAND_VERBS = ("click", "type", "key", "scroll", "move")
 _HAND_SPECS = tuple(f"Bash(vasper {verb}:*)" for verb in _HAND_VERBS)
 
 
+HAND_SPECS = _HAND_SPECS
+
+# What asking for the hands sounds like. "Click on the LinkedIn tab" is the
+# request; answering it with "do I click for you?" is friction, and on
+# 2026-09-05 01:44 the reply to that question was "no, no, click on the
+# LinkedIn tab", whose "no" refused the click. So an utterance that itself
+# names a hand action, used as a verb with an object, is the yes for that turn.
+# Questions about the hands ("can you click when I ask") and anything carrying
+# a refusal word are not requests.
+_HAND_REQUEST = re.compile(
+    r"\b(?:double[ -]?click|right[ -]?click|click|tap)\s+(?:on|the|that|this|it|at|here|there)\b"
+    r"|\b(?:click|tap)\s+[\"']"
+    r"|\btype\s+(?:in|into|the|this|that|it|out)\b"
+    r"|\btype\s+[\"']"
+    r"|\btype\s+\S.*\b(?:in|into)\b"
+    r"|\bpress\s+(?:enter|return|escape|esc|tab|space|backspace|delete|ctrl|control|alt|shift|the\s+\S+\s+key)\b"
+    r"|\bscroll\s+(?:up|down)\b"
+    r"|\b(?:switch|go|move|change)\s+to\s+(?:the\s+)?(?:\S+\s+){0,3}tab\b"
+    r"|\bselect\s+(?:the\s+)?(?:\S+\s+){0,3}(?:tab|option|item|button)\b",
+    re.IGNORECASE,
+)
+_NOT_A_HAND_REQUEST = re.compile(
+    r"\b(?:don'?t|do not|never|stop|are you able|would you be able|be able to|when i ask|if i ask|"
+    r"how do i|how do you|what (?:does|is|type))\b",
+    re.IGNORECASE,
+)
+
+
+def asked_for_hands(text: str) -> bool:
+    """Does this utterance itself ask for a click, a key or typing?"""
+    text = text or ""
+    return bool(_HAND_REQUEST.search(text)) and not _NOT_A_HAND_REQUEST.search(text)
+
+
+def request_after_refusal(text: str) -> str:
+    """The instruction riding on a no: "no, no, click on the LinkedIn tab".
+
+    Returns the part after the refusal words when it is a sentence in its own
+    right, and "" when the whole thing was a refusal ("no thanks", "no, leave
+    it"). The caller declines the pending question first, then treats what is
+    left as the next thing the user said, instead of dropping it.
+    """
+    words = _WORD.findall((text or "").lower())
+    while words and (words[0] in _DECISIVE_NO or words[0] in _FILLER or words[0] in {"thanks", "thank", "you"}):
+        words.pop(0)
+    rest = " ".join(words)
+    if len(words) < 3 or hear_answer(rest) == NO:
+        return ""
+    return rest
+
+
 def _is_hand(verb: str) -> bool:
     parts = verb.split()
     return len(parts) == 2 and parts[0] == "vasper" and parts[1] in _HAND_VERBS

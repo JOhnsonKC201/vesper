@@ -23,6 +23,11 @@ UNDONE = "undone"
 # the tool until it is taken back. This is how the ones you were never asked
 # about stop being invisible.
 UNASKED = "unasked"
+# The hands, granted because the user's own words asked for the click or the
+# typing ("click on the LinkedIn tab"). Not an approval given to a question,
+# because no question was asked; recorded so the log still says why the mouse
+# moved.
+ASKED_FOR = "asked-for"
 
 
 def record(path: Path | str, decision: str, action: str, *, at: datetime | None = None) -> None:
