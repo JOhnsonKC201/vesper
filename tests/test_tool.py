@@ -27,6 +27,7 @@ def test_only_looking_and_visible_changes_are_free():
         "Bash(vasper apps:*)",
         "Bash(vasper screenshot:*)",
         "Bash(vasper look:*)",
+        "Bash(vasper read:*)",
         "Bash(vasper focus:*)",
         "Bash(vasper open:*)",
     }
@@ -180,7 +181,7 @@ def test_screenshots_do_not_fill_the_disk(tmp_path, monkeypatch):
 
 def test_every_subcommand_is_reachable():
     parser = tool.build_parser()
-    for command in ("windows", "apps", "open", "focus", "screenshot", "look"):
+    for command in ("windows", "apps", "open", "focus", "screenshot", "look", "read"):
         args = parser.parse_args([command] + (["x"] if command in {"open", "focus"} else []))
         assert callable(args.run), command
     for argv in (["click", "Send"], ["click", "812", "640", "--right"], ["move", "1", "2"],
@@ -260,6 +261,33 @@ def test_a_look_at_a_sensitive_window_is_refused(monkeypatch, capsys):
     assert tool.main(["look"]) == 1
     out = capsys.readouterr().out
     assert "[hidden]" in out and "1Password" not in out
+
+
+def test_reading_a_sensitive_window_is_refused_too(monkeypatch, capsys):
+    monkeypatch.setattr(tool, "_front_window", lambda: (42, "Chase Bank - Online Banking"))
+    assert tool.main(["read"]) == 1
+    out = capsys.readouterr().out
+    assert "[hidden]" in out and "Chase" not in out
+
+
+def test_read_prints_the_page_text_under_the_window_title(monkeypatch, capsys):
+    monkeypatch.setattr(tool, "_front_window", lambda: (42, "Weather - Google Chrome"))
+    monkeypatch.setattr(tool.hands, "attach", lambda handle: object())
+    monkeypatch.setattr(tool.hands, "page_text", lambda window, max_chars=6000: "Tomorrow 71 F, sunny")
+    assert tool.main(["read"]) == 0
+    out = capsys.readouterr().out
+    assert "window: Weather - Google Chrome" in out and "Tomorrow 71 F, sunny" in out
+
+
+def test_look_find_narrows_a_long_page_to_matching_controls(monkeypatch, capsys):
+    monkeypatch.setattr(tool, "_front_window", lambda: (42, "Jobs - Google Chrome"))
+    monkeypatch.setattr(tool, "_elements_of", lambda handle, limit=120: [
+        tool.hands.Element(i, name, "Hyperlink", 0, i * 10, 100, i * 10 + 8)
+        for i, name in enumerate(["Home", "Sign in", "Careers", "Sign in with Google"])
+    ])
+    assert tool.main(["look", "--find", "sign in"]) == 0
+    out = capsys.readouterr().out
+    assert "'Sign in'" in out and "'Sign in with Google'" in out and "Careers" not in out
 
 
 def _fake_win32(monkeypatch, *, front: int):

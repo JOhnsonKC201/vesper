@@ -425,6 +425,18 @@ def cmd_look(args) -> int:
         # password manager's controls are exactly as revealing as its title.
         print(f"the window in front is {_safe_title(title)}, and I do not read those")
         return 1
+    if args.find:
+        # A web page has hundreds of controls and the list is capped, so a
+        # search reads deeper than the plain list and keeps only what matches.
+        needle = args.find.lower()
+        elements = [e for e in _elements_of(handle, 600) if needle in e.name.lower()][:40]
+        print(f"window: {title}")
+        if not elements:
+            print(f"  nothing named like {args.find!r} in it")
+            return 0
+        for element in elements:
+            print("  " + element.describe())
+        return 0
     elements = _elements_of(handle, args.max)
     print(f"window: {title}")
     if not elements:
@@ -433,6 +445,31 @@ def cmd_look(args) -> int:
         return 0
     for element in elements:
         print("  " + element.describe())
+    return 0
+
+
+def cmd_read(args) -> int:
+    """The text of the front window, or a named one: a web page, a document."""
+    if args.window:
+        window = find_window(args.window)
+        if window is None:
+            print(f"no window matching {args.window!r}")
+            return 1
+        handle, title = window.handle, window.title
+    else:
+        handle, title = _front_window()
+    if not handle:
+        print("no window in front")
+        return 1
+    if _SENSITIVE.search(title):
+        print(f"the window in front is {_safe_title(title)}, and I do not read those")
+        return 1
+    text = hands.page_text(hands.attach(handle), max_chars=args.max_chars)
+    print(f"window: {title}")
+    if not text:
+        print("  no readable text in it; take a screenshot instead")
+        return 0
+    print(text)
     return 0
 
 
@@ -545,7 +582,13 @@ def build_parser() -> argparse.ArgumentParser:
     look = subs.add_parser("look", help="what is on the front window, numbered, with positions")
     look.add_argument("--window", default="", help="look at this window instead of the front one")
     look.add_argument("--max", type=int, default=hands.MAX_ELEMENTS)
+    look.add_argument("--find", default="", help="only controls whose name contains this")
     look.set_defaults(run=cmd_look)
+
+    reader = subs.add_parser("read", help="the text of the front window: a page, a document")
+    reader.add_argument("--window", default="")
+    reader.add_argument("--max-chars", type=int, default=6000)
+    reader.set_defaults(run=cmd_read)
 
     click = subs.add_parser("click", help="glide to a control by name, or to X Y, and click")
     click.add_argument("target", nargs="+")
