@@ -563,6 +563,34 @@ def test_typed_input_answers_the_question_too():
     assert conv.approvals == 1
 
 
+def test_a_yes_to_the_hands_grants_the_set_and_says_the_task_is_the_unit():
+    """The first live run, 2026-09-05: told "do exactly this one action", Claude
+    typed nothing after the yes and announced that typing would need a separate
+    go-ahead. The hands are one grant for the turn, and the note has to say so."""
+    brain = DenyingBrain(
+        request_tool="Bash", request_input={"command": 'vasper type "hello from vasper"'}
+    )
+    conv, speaker, ui, voice = _build(brain, ["Vesper type hello in it", "Vesper yes"])
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    assert voice.lines[-1] == (
+        "I want to use the mouse and keyboard to type hello from vasper. Do I do this for you?"
+    )
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    speaker.close()
+
+    assert brain.grant_history == [(
+        "Bash(vasper click:*)", "Bash(vasper type:*)", "Bash(vasper key:*)",
+        "Bash(vasper scroll:*)", "Bash(vasper move:*)",
+    )]
+    assert brain.grants == (), "handed back when the turn ended"
+    note = brain.asked[-1]
+    assert "mouse and keyboard for the rest of this turn" in note
+    assert "look again before the next action" in note
+    assert "this one action" not in note
+
+
 def test_every_decision_is_written_down(tmp_path):
     log = tmp_path / "actions.log"
     brain = DenyingBrain()

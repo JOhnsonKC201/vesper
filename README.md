@@ -539,6 +539,21 @@ open, says it only acts on a plain answer, and when the plain yes comes it
 passes your condition along as an instruction about how. A no is a no for that
 request, not forever: ask again later and you will be asked again.
 
+**Hands.** It has a mouse and a keyboard, through the same `vasper` command that
+gives it eyes, and it uses them in front of you. `vasper look` lists every
+control on the front window with its position and is free, like a screenshot.
+`vasper click "Search"`, `vasper type "weather baltimore" --enter`, `vasper key
+ctrl+l`, `vasper scroll down` and `vasper move` are the hands, and the first one
+in a turn is refused and asked about: "I want to use the mouse and keyboard to
+click Search. Do I do this for you?" One yes covers all five for that turn and
+is handed back when the turn ends. Every click glides the cursor across the
+screen first and every character is typed one at a time, so you see what is
+about to happen and can say stop. Asked to look something up, it will open the
+browser and type the search where you can watch rather than call a background
+tool. Two things it will not do: click inside a window whose title it hides
+(password managers, banking, private browsing), and act on a name that matches
+two controls; it names both and asks you to pick.
+
 Three things make that a real gate rather than a polite one:
 
 **The refusal happens in the CLI, not in the prompt.** The brain runs with

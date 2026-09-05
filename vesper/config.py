@@ -95,11 +95,15 @@ class BrainSettings:
         "Bash(df:*)",
         "Bash(tasklist:*)",
         "Bash(systeminfo:*)",
-        # Vasper's own hands. Looking, and the two changes that are only ever
-        # visible ones. See vesper/tool.py.
+        # Vasper's eyes, and the two changes that are only ever visible ones.
+        # `look` reads a window's controls and changes nothing. The hands
+        # themselves (click, type, key, scroll, move) are NOT here and must not
+        # be added: they go through the spoken gate, one yes per turn. See
+        # vesper/tool.py and consent._HAND_VERBS.
         "Bash(vasper windows:*)",
         "Bash(vasper apps:*)",
         "Bash(vasper screenshot:*)",
+        "Bash(vasper look:*)",
         "Bash(vasper focus:*)",
         "Bash(vasper open:*)",
         "Bash(date:*)",

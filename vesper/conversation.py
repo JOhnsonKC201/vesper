@@ -43,6 +43,7 @@ from .brain.consent import QUALIFIED
 from .brain.persona import (
     APPROVED_NOTE,
     DECLINED_NOTE,
+    HANDS_APPROVED_NOTE,
     INTERRUPTED_NOTE,
     STILL_WORKING_FILLERS,
     THINKING_FILLERS,
@@ -881,7 +882,8 @@ class Conversation:
                 request.written(), request.tool, request.tool_input
             )
         self._say("Doing it.")
-        note = APPROVED_NOTE.format(action=request.written())
+        template = HANDS_APPROVED_NOTE if request.is_hands else APPROVED_NOTE
+        note = template.format(action=request.written())
         if condition:
             note += (
                 f" When first asked, the user answered: {condition[:200]!r}. "
