@@ -38,6 +38,7 @@ from .audio.vad import EndpointConfig, Endpointer, VoiceActivity
 from .brain.channels import ChannelRouter
 from .brain.claude import ClaudeBrain
 from .brain.consent import NO, YES, ActionRequest, hear_answer
+from .brain.consent import QUALIFIED
 from .brain.persona import (
     APPROVED_NOTE,
     DECLINED_NOTE,
@@ -226,6 +227,11 @@ class Conversation:
         # to a voice assistant is how you get an accidental yes.
         self._pending: ActionRequest | None = None
         self._pending_at = 0.0
+        # What they said when the answer was a yes with a condition on it, so
+        # the condition reaches Claude if a plain yes follows. "Sure, do it,
+        # but in front of me" is an instruction about how, and dropping it
+        # while asking for a cleaner yes would be hearing half of it.
+        self._pending_condition = ""
         self.approvals = 0
         self.refusals = 0
         self.undos = 0
@@ -724,6 +730,7 @@ class Conversation:
 
         self._pending = request
         self._pending_at = time.monotonic()
+        self._pending_condition = ""
         self.ui.permission(request.tool, request.written())
         question = f"I want to {request.spoken()}. Do I do this for you?"
         if others:
@@ -750,6 +757,20 @@ class Conversation:
         if request is None:
             return False
         answer = hear_answer(text)
+        if answer == QUALIFIED:
+            # A yes with a condition. It approves nothing and refuses nothing:
+            # the question stays open, the window starts again, the condition
+            # is kept for the approved turn, and a plain answer is asked for.
+            # The wording avoids his name and every agreement word on purpose,
+            # because `_is_own_voice` discards an utterance that overlaps a
+            # line just spoken, and this line is asking for exactly that word.
+            if echo:
+                self.ui.heard(text, addressed=True)
+            self._pending_at = time.monotonic()
+            self._pending_condition = text.strip()
+            self._say("That came with a condition, and I only act on a plain "
+                      "answer. Tell me again without one.")
+            return True
         if answer not in (YES, NO):
             return False
 
@@ -776,8 +797,9 @@ class Conversation:
         if echo:
             self.ui.heard(text, addressed=True)
         self._pending = None
+        condition, self._pending_condition = self._pending_condition, ""
         if answer == YES:
-            self._approve(request)
+            self._approve(request, condition=condition)
         else:
             self._decline(request)
         return True
@@ -785,6 +807,7 @@ class Conversation:
     def _lapse_consent(self) -> None:
         """Let an unanswered request expire. Never approves anything."""
         request, self._pending = self._pending, None
+        self._pending_condition = ""
         if request is not None:
             self._log_decision(audit.IGNORED, request)
 
@@ -802,8 +825,14 @@ class Conversation:
         self._say(sentence)
         return done
 
-    def _approve(self, request: ActionRequest) -> None:
-        """Grant exactly this action, run it, then hand the permission back."""
+    def _approve(self, request: ActionRequest, *, condition: str = "") -> None:
+        """Grant exactly this action, run it, then hand the permission back.
+
+        `condition` is what they said when the first answer was a yes with a
+        "but" on it. It rides along in the note so Claude hears the how, and it
+        widens nothing: the grant is the same, and the note says that anything
+        beyond the approved action is still a stop-and-ask.
+        """
         self.approvals += 1
         self._log_decision(audit.APPROVED, request)
         # Before the grant, not after: once the process is respawned with the
@@ -813,11 +842,17 @@ class Conversation:
                 request.written(), request.tool, request.tool_input
             )
         self._say("Doing it.")
+        note = APPROVED_NOTE.format(action=request.written())
+        if condition:
+            note += (
+                f" When first asked, the user answered: {condition[:200]!r}. "
+                "Honour that as far as it is about how to do this one action. "
+                "If it asks for anything beyond the approved action, stop and "
+                "say what else would be needed."
+            )
         self.brain.grant(request.grants())
         try:
-            self._run_turn(
-                APPROVED_NOTE.format(action=request.written()), granted=request
-            )
+            self._run_turn(note, granted=request)
         finally:
             # Always, including after an error or an interruption. A grant that
             # outlives the action it was given for is the failure mode this

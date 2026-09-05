@@ -530,6 +530,12 @@ vesper  Doing it.
 vesper  Committed, one file changed.
 ```
 
+Only a plain yes counts. "Sure, do it, but in front of me" is a yes with a
+condition, and Vesper will not act on half an agreement: it keeps the question
+open, says it only acts on a plain answer, and when the plain yes comes it
+passes your condition along as an instruction about how. A no is a no for that
+request, not forever: ask again later and you will be asked again.
+
 Three things make that a real gate rather than a polite one:
 
 **The refusal happens in the CLI, not in the prompt.** The brain runs with
