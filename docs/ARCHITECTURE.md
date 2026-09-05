@@ -26,6 +26,35 @@ split is what makes the protocol testable against a recorded transcript, so a
 change in the CLI's frame shape fails a unit test rather than silently making
 Vesper mute.
 
+### When the CLI cannot run the turn at all
+
+The CLI reports a turn it could not run as an ordinary `result` frame with
+`is_error` set and its own explanation as the text. Until 2026-09-04 that text
+took the same path as an answer. That night the laptop woke from a 21 hour
+sleep with the saved login expired, every turn came back `authentication_failed`,
+and Vesper said "Failed to authenticate: OAuth session expired and could not be
+refreshed" three times in its own voice, counted each as a success, and left
+nothing in the log.
+
+`brain/failures.py` names the failure from the result's `is_error`, from the
+error code the CLI puts on its message (`authentication_failed`) and, as a
+fallback, from the wording. The ladder in `Conversation._failed_turn` is: log
+the CLI's text as an ERROR and count a failure; for anything but a dead login,
+say one plain sentence and stop; for a dead login, respawn the brain once and
+ask the same thing again, because a fresh child re-reads the credentials file
+and that is the only way a login renewed in some other terminal reaches this
+process; if the retry fails too, lock out. Locked out, every utterance first
+runs `claude auth status` (exit 0 logged in, 1 not), a subprocess rather than
+a model call, and the moment it says logged in the brain is respawned and the
+turn goes through. The same check runs before the brain is spawned at start,
+so a Vesper launched onto a dead login says so instead of failing quietly all
+evening.
+
+One mechanical point. `ClaudeBrain.ask` holds its busy lock for as long as its
+generator is open, so the conversation closes the generator before it calls
+`restart()`, which takes the same lock. A respawn from inside the loop would
+deadlock, and the fake brain in the tests has no lock to show it.
+
 ### The flag that decides whether this is viable at all
 
 Asking Claude to reply with one word, measured on this machine:
