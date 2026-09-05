@@ -39,11 +39,12 @@ from .audio.vad import EndpointConfig, Endpointer, VoiceActivity
 from .brain.channels import ChannelRouter
 from .brain.claude import ClaudeBrain
 from .brain.consent import NO, YES, ActionRequest, hear_answer
-from .brain.consent import QUALIFIED
+from .brain.consent import HAND_SPECS, QUALIFIED, asked_for_hands, request_after_refusal
 from .brain.persona import (
     APPROVED_NOTE,
     DECLINED_NOTE,
     HANDS_APPROVED_NOTE,
+    HANDS_ASKED_NOTE,
     INTERRUPTED_NOTE,
     STILL_WORKING_FILLERS,
     THINKING_FILLERS,
@@ -840,8 +841,14 @@ class Conversation:
         condition, self._pending_condition = self._pending_condition, ""
         if answer == YES:
             self._approve(request, condition=condition)
-        else:
-            self._decline(request)
+            return True
+        self._decline(request)
+        rest = request_after_refusal(text)
+        if rest:
+            # "No, no, click on the LinkedIn tab." The no answers the question
+            # and the rest is the next request. Dropping it is how the first
+            # evening ended with the user saying the same thing four times.
+            self.respond(rest)
         return True
 
     def _lapse_consent(self) -> None:
@@ -1118,7 +1125,32 @@ class Conversation:
             sensors.context_block(now), self.register.line()
         )
         self.register.note_turn(now.window.process)
-        self._run_turn(frame_turn(text, context))
+        payload = frame_turn(text, context)
+        if self.config.consent_enabled and not self._locked_out and asked_for_hands(text):
+            self._run_with_hands(payload, text)
+            return
+        self._run_turn(payload)
+
+    def _run_with_hands(self, payload: str, text: str) -> None:
+        """The request names the click or the typing, so the request is the yes.
+
+        "Click on the LinkedIn tab" was answered with "do I click at 2979 20
+        for you?", and the reply, "no, no, click on the LinkedIn tab", refused
+        the click (2026-09-05 01:44). Asking someone to approve the thing they
+        just asked for is friction, not consent. So an utterance that itself
+        asks for a hand action grants the hands for that one turn, written to
+        the actions log as asked for, and handed back when the turn ends like
+        any other grant. Everything Vesper thinks of on its own still asks.
+        """
+        self.approvals += 1
+        self.ui.decision(audit.ASKED_FOR, f"hands: {text[:200]}")
+        if self.config.audit_log is not None:
+            audit.record(self.config.audit_log, audit.ASKED_FOR, f"hands: {text[:200]}")
+        self.brain.grant(HAND_SPECS)
+        try:
+            self._run_turn(HANDS_ASKED_NOTE + "\n\n" + payload)
+        finally:
+            self.brain.revoke_soon()
 
     def _complain_about_login(self) -> None:
         """The one sentence about a dead login, at most once per AUTH_NAG_S."""

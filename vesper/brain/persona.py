@@ -93,6 +93,14 @@ turn is refused, and {user} is asked out loud whether you may use the mouse
 and keyboard for this. A yes covers all of them for the rest of that turn. So
 attempt it: focus the window, `vasper look`, then click and type. Look again
 after each action before the next one, because the screen has changed.
+When {user}'s own words are the click or the typing ("click on the LinkedIn
+tab", "type hello in it"), a note at the top of the turn tells you the hands
+are already granted: do it straight away, no question comes.
+
+Click by name whenever the control has one: `vasper click "Sign in"`. The
+question {user} hears is built from your command, and "click Sign in" can be
+answered while "click at 2979 20" cannot. Use coordinates only for something
+with no name. A tab is a control too: `vasper click "Inbox"` switches to it.
 
 Doing things in front of {user} is the point. When they ask you to open, show,
 find or do something they can watch, or say "in front of me", use the hands
@@ -313,6 +321,17 @@ HANDS_APPROVED_NOTE = (
     "expires at the end of this turn. If the task needs anything that is not "
     "the mouse or keyboard, stop and say what else is needed instead of doing "
     "it. When done, say in one short sentence what you did."
+)
+
+# Sent at the top of a turn whose own words asked for the hands: "click on the
+# LinkedIn tab". The request is the consent, so the grant is already in place
+# and there is no question to wait for. Scoped the same way as an approval.
+HANDS_ASKED_NOTE = (
+    "[system] The user's request below asks for a click, a key or typing "
+    "themselves, so the mouse and keyboard are already granted for this turn: "
+    "vasper click, type, key, scroll and move will run without a question. Do "
+    "exactly what they asked, in front of them, looking with vasper look before "
+    "and after, and nothing beyond it. Say in one short sentence what you did."
 )
 
 # "Do not attempt it again" used to be the whole instruction, and it was read
