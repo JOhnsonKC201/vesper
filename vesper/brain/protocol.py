@@ -18,6 +18,12 @@ Observed frame shapes (recorded from claude 2.1.250):
         {"type":"tool_use","name":"Bash","input":{"command":"..."}}]}}
     {"type":"result","is_error":false,"num_turns":2,"session_id":"...",
         "total_cost_usd":0.008,"duration_api_ms":5470,"usage":{...}}
+
+A turn the CLI could not run at all (recorded 2026-09-04, when the saved login
+had expired) is one `assistant` frame whose only block is the CLI's own text,
+marked "error":"authentication_failed", followed by a `result` frame with
+"is_error":true. No deltas arrive. The text is the CLI talking about itself and
+must never be spoken as Vesper's answer; `failures.py` names it instead.
 """
 
 from __future__ import annotations
@@ -89,6 +95,12 @@ class TurnComplete:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     is_error: bool = False
+    # Set only when `is_error` is. The result frame's subtype names how the
+    # turn failed (`error_during_execution`); the api error is the code the
+    # CLI put on its error message (`authentication_failed`), which is more
+    # precise than the text and does not change when the wording does.
+    error_subtype: str = ""
+    api_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -154,11 +166,15 @@ class StreamParser:
         # calls should not grow this without limit.
         self._tool_uses: dict[str, tuple[str, dict]] = {}
         self._denied: set[str] = set()
+        # The error code from an assistant frame the CLI flagged as an API
+        # error, carried to the result so the turn can be named precisely.
+        self._api_error: str = ""
 
     def reset_turn(self) -> None:
         self._buffer.clear()
         self._tool_uses.clear()
         self._denied.clear()
+        self._api_error = ""
 
     @property
     def turn_text(self) -> str:
@@ -243,6 +259,12 @@ class StreamParser:
             return
 
         if kind == "assistant":
+            # A turn the CLI could not run arrives as an assistant frame whose
+            # text is the CLI's explanation, marked with an error code. Recorded
+            # 2026-09-04: {"error":"authentication_failed","isApiErrorMessage":true}.
+            error = frame.get("error")
+            if isinstance(error, str) and error:
+                self._api_error = error
             for block in (frame.get("message") or {}).get("content") or []:
                 if not isinstance(block, dict):
                     continue
@@ -282,6 +304,7 @@ class StreamParser:
             final = frame.get("result")
             if not isinstance(final, str) or not final.strip():
                 final = self.turn_text
+            is_error = bool(frame.get("is_error"))
             yield TurnComplete(
                 text=final.strip(),
                 session_id=self.session_id,
@@ -293,7 +316,9 @@ class StreamParser:
                 output_tokens=int(usage.get("output_tokens") or 0),
                 cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
                 cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
-                is_error=bool(frame.get("is_error")),
+                is_error=is_error,
+                error_subtype=str(frame.get("subtype") or "") if is_error else "",
+                api_error=self._api_error if is_error else "",
             )
             self.reset_turn()
             return
