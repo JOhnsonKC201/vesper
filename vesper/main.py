@@ -193,7 +193,10 @@ def build(cfg: config_module.Config, *, with_mic: bool = True):
             turn_timeout_s=cfg.brain.turn_timeout_s,
             permission_mode=cfg.brain.permission_mode,
         ),
-        log=ui.info if "-v" in sys.argv else (lambda message: None),
+        # With -v the brain's lines share the console. Without it they still
+        # go to the file, tagged BRAIN: on 2026-09-04 the child failed every
+        # turn for an evening and the log had no trace of a brain at all.
+        log=ui.info if "-v" in sys.argv else (lambda message: log.write("brain", message)),
     )
 
     stt = Listener(
