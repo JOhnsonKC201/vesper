@@ -159,6 +159,36 @@ def test_every_subcommand_is_reachable():
         assert callable(args.run), command
 
 
+def _fake_win32(monkeypatch, *, front: int):
+    """SetForegroundWindow that Windows quietly ignores, which is the normal
+    case from a background process, plus whichever window is really in front."""
+    win32gui = pytest.importorskip("win32gui")
+    monkeypatch.setattr(win32gui, "IsIconic", lambda handle: False)
+    monkeypatch.setattr(win32gui, "SetForegroundWindow", lambda handle: None)
+    monkeypatch.setattr(win32gui, "GetForegroundWindow", lambda: front)
+    monkeypatch.setattr(win32gui, "GetWindowText", lambda handle: "Terminal" if handle == 7 else "Notepad")
+    monkeypatch.setattr(
+        tool, "find_window", lambda title: tool.Window(42, 1, "notepad.exe", "Untitled - Notepad")
+    )
+
+
+def test_focus_reports_the_window_that_actually_won(monkeypatch, capsys):
+    """On 2026-09-05 focus said "focused LinkedIn" while the terminal stayed on
+    top, and the brain went on to describe a screenshot of the wrong window.
+    The call rarely raises when Windows ignores it, so the result is checked."""
+    _fake_win32(monkeypatch, front=7)
+    assert tool.main(["focus", "notepad"]) == 1
+    printed = capsys.readouterr().out
+    assert "kept 'Terminal' in front" in printed
+    assert "focused" not in printed
+
+
+def test_focus_says_focused_only_when_the_window_is_in_front(monkeypatch, capsys):
+    _fake_win32(monkeypatch, front=42)
+    assert tool.main(["focus", "notepad"]) == 0
+    assert "focused Untitled - Notepad" in capsys.readouterr().out
+
+
 def test_a_failure_is_a_sentence_rather_than_a_traceback(monkeypatch, capsys):
     """The output is read by a model, which would parse a traceback as a result."""
     def explode():
