@@ -108,7 +108,10 @@ running. Measured after the change: clean exit in 1.0s, zero orphaned processes.
 
 **Seeing failures.** Diagnostics now also append to `var/vesper.log`, rotating
 at 2MB. Without it, a hidden process with an unplugged microphone fails in
-complete silence.
+complete silence. The brain's own lines are in there too, tagged `BRAIN`: when
+the `claude` child was spawned, when it stopped, and whatever it wrote to
+stderr. A turn the CLI reports as failed lands as an `ERROR` line carrying the
+CLI's text, and is spoken as one plain sentence, never as that text.
 
 **Only answering you.** `run.bat --enroll` reads four sentences and saves a
 voice profile. After that a clearly different voice is ignored, an unsure one is
@@ -711,6 +714,15 @@ on an old request, and a grant never widens past the verb it was given for.
 
 - **The conversation does reach Anthropic.** Everything else is local, but the
   brain is Claude. That is inherent to "use Claude Code, not the API".
+- **The login can expire while it sleeps.** On 2026-09-04 the laptop woke from
+  a 21 hour sleep with the CLI's saved login gone, and every turn came back
+  "Failed to authenticate: OAuth session expired and could not be refreshed",
+  which Vesper read aloud three times as if it were its own answer. Now that
+  turn is logged as an error, the brain is respawned once and the question
+  asked again, and if the login is still dead Vesper says so in one sentence
+  and waits. Run `claude login` in any terminal; the next thing you say gets a
+  fresh brain. `claude auth status` is also asked before the brain is spawned
+  at all, so a Vesper started onto a dead login says so at once.
 - **Whisper uses the gpu when the gpu is usable.** It asked torch about a
   CTranslate2 runtime, which is the wrong library, so it never did. It now asks
   CTranslate2 and proves the answer with a real inference. Without the two
