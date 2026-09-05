@@ -50,6 +50,13 @@ def brain_factory():
             return [args[0], str(FAKE)] + args[1:]
 
         config.argv = argv
+        original_status = config.status_argv
+
+        def status_argv():
+            args = original_status()
+            return [args[0], str(FAKE)] + args[1:]
+
+        config.status_argv = status_argv
         brain = ClaudeBrain(config)
         created.append(brain)
         return brain
@@ -371,3 +378,46 @@ def test_a_grant_waits_for_a_turn_that_is_already_running(brain_factory):
     granter.join(timeout=10)
     assert granted.is_set(), "the grant never completed"
     assert brain.grants == ("Write",)
+
+
+# --- a login that has died ---------------------------------------------------
+
+AUTH_ERROR = "Failed to authenticate: OAuth session expired and could not be refreshed"
+
+
+def test_a_dead_login_arrives_as_an_error_result_not_an_answer(brain_factory):
+    brain = brain_factory(["Fine now."], FAKE_CLAUDE_AUTH_FAIL=1)
+    events = collect(brain, "hello")
+
+    assert of(events, TextDelta) == [], "the CLI sends no deltas for a failed turn"
+    done = of(events, TurnComplete)[0]
+    assert done.is_error is True
+    assert done.text == AUTH_ERROR
+    assert done.api_error == "authentication_failed"
+    assert done.error_subtype == "error_during_execution"
+    assert brain.alive, "a failed turn is not a dead process"
+
+
+def test_a_restart_picks_up_a_login_renewed_elsewhere(brain_factory):
+    brain = brain_factory(["Fine now."], FAKE_CLAUDE_AUTH_FAIL=1)
+    assert of(collect(brain, "hello"), TurnComplete)[0].is_error
+    first_pid = brain._process.pid
+
+    # The user logged in again in some other terminal. Only a fresh child
+    # sees it, which is the whole reason the recovery is a respawn.
+    os.environ["FAKE_CLAUDE_AUTH_FAIL"] = "0"
+    brain.restart()
+
+    done = of(collect(brain, "hello again"), TurnComplete)[0]
+    assert (done.is_error, done.text) == (False, "Fine now.")
+    assert brain.alive and brain._process.pid != first_pid
+
+
+def test_auth_status_reads_the_exit_code(brain_factory):
+    assert brain_factory(FAKE_CLAUDE_LOGGED_IN=1).auth_status() is True
+    assert brain_factory(FAKE_CLAUDE_LOGGED_IN=0).auth_status() is False
+
+
+def test_auth_status_is_none_when_the_question_cannot_be_asked():
+    brain = ClaudeBrain(BrainConfig(executable="C:/no/such/dir/claude-that-is-not-there.exe"))
+    assert brain.auth_status() is None
