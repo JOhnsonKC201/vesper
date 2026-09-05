@@ -119,6 +119,43 @@ def test_an_unknown_name_finds_nothing():
     assert find_element([element(0, "Save")], "   ") == (None, [])
 
 
+class _Node:
+    def __init__(self, text):
+        self._text = text
+
+    def window_text(self):
+        return self._text
+
+
+class _Window:
+    def __init__(self, texts):
+        self.texts = texts
+
+    def descendants(self, control_type=None):
+        assert control_type == "Text"
+        return [_Node(t) for t in self.texts]
+
+
+def test_page_text_reads_the_text_controls_in_order_and_tidies_whitespace():
+    window = _Window(["  Weather  in\n Baltimore ", "", "  Tomorrow: 71 F, sunny  "])
+    assert hands.page_text(window) == "Weather in Baltimore\nTomorrow: 71 F, sunny"
+
+
+def test_page_text_is_capped_and_says_so():
+    window = _Window(["x" * 50] * 100)
+    text = hands.page_text(window, max_chars=200)
+    assert text.endswith("...")
+    assert len(text) < 400
+
+
+def test_page_text_survives_a_window_that_cannot_be_read():
+    class Broken:
+        def descendants(self, control_type=None):
+            raise RuntimeError("gone")
+
+    assert hands.page_text(Broken()) == ""
+
+
 def test_the_walk_caps_are_real_numbers_not_infinity():
     assert 0 < hands.MAX_ELEMENTS <= 200
     assert 0 < hands.MAX_DEPTH <= 20

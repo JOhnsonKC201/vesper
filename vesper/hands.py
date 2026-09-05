@@ -273,6 +273,37 @@ def walk(window, *, max_elements: int = MAX_ELEMENTS, max_depth: int = MAX_DEPTH
     return elements
 
 
+def page_text(window, *, max_chars: int = 6000, max_nodes: int = 800) -> str:
+    """The readable text of a window, in tree order.
+
+    Measured on a Chrome page 2026-09-05: the document's UIA text pattern
+    returned 152 characters, the cookie banner and nothing else, while the
+    147 `Text` controls under it held the whole page, 6,965 characters, in
+    0.08 s. So this reads the text controls and ignores the text pattern.
+    Capped in both directions, because a long page is thousands of nodes and
+    the brain does not need all of them to answer "what does it say".
+    """
+    try:
+        nodes = window.descendants(control_type="Text")
+    except Exception:
+        return ""
+    pieces: list[str] = []
+    total = 0
+    for node in nodes[:max_nodes]:
+        try:
+            text = " ".join(str(node.window_text() or "").split())
+        except Exception:
+            continue
+        if not text:
+            continue
+        pieces.append(text)
+        total += len(text) + 1
+        if total >= max_chars:
+            pieces.append("...")
+            break
+    return "\n".join(pieces)
+
+
 def attach(handle: int):
     """UI Automation attached to one window by handle.
 

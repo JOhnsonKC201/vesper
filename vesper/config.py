@@ -104,6 +104,7 @@ class BrainSettings:
         "Bash(vasper apps:*)",
         "Bash(vasper screenshot:*)",
         "Bash(vasper look:*)",
+        "Bash(vasper read:*)",
         "Bash(vasper focus:*)",
         "Bash(vasper open:*)",
         "Bash(date:*)",

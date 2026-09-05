@@ -32,6 +32,9 @@ def test_the_prompt_does_not_claim_a_mouse_or_keyboard():
     assert "vasper look" in prompt and "vasper click" in prompt
     assert "mouse and keyboard" in prompt and "in front of" in prompt
     assert "vasper focus" in prompt and "vasper screenshot" in prompt
+    # Browsing is the hands in Chrome, read off the page, never a background fetch.
+    assert "BROWSING" in prompt and "vasper read" in prompt
+    assert "never through WebSearch or WebFetch when they can watch" in prompt
 
 
 def test_no_dashes_in_the_spoken_wording():
