@@ -120,6 +120,11 @@ class BrainConfig:
             args += ["--resume", resume_session]
         return args
 
+    def status_argv(self) -> list[str]:
+        """`claude auth status`: exit 0 logged in, 1 not. Separate from `argv`
+        so a test can point both at the same stand-in executable."""
+        return [self.executable, "auth", "status"]
+
 
 class ClaudeBrain:
     """A conversation with Claude that survives across many spoken turns.
@@ -212,9 +217,52 @@ class ClaudeBrain:
             self._log("brain stopped")
 
     def restart(self) -> None:
-        """Respawn, resuming the same conversation if we have a session id."""
-        self.stop()
-        self.start(resume=bool(self.session_id))
+        """Respawn, resuming the same conversation if we have a session id.
+
+        Under the busy lock, like `grant`, so the ambient loop cannot start a
+        turn on a process that is being torn down. The caller must therefore
+        not be inside an `ask()` generator when it calls this: close the
+        generator first, which releases the lock.
+        """
+        with self._busy:
+            self.stop()
+            self.start(resume=bool(self.session_id))
+
+    def auth_status(self) -> bool | None:
+        """Ask the CLI whether it is logged in, without spending a turn.
+
+        `claude auth status` exits 0 when logged in and 1 when not. None means
+        the question could not be asked (no binary, a hang, an exit code that
+        is neither) and the caller should behave as it did before this check
+        existed, rather than refuse to start over a flaky probe.
+
+        This exists because of 2026-09-04: the saved login expired during a
+        long sleep, every turn failed, and nothing short of a model call could
+        have told Vesper so. This is that cheaper question.
+        """
+        try:
+            done = subprocess.run(
+                self.config.status_argv(),
+                cwd=self.config.cwd,
+                env=child_env(),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                creationflags=_NO_WINDOW,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self._log("auth status could not be checked: " + str(exc))
+            return None
+        if done.returncode == 0:
+            return True
+        if done.returncode == 1:
+            return False
+        self._log(
+            f"auth status exited {done.returncode}: {done.stderr.strip()[:200]}"
+        )
+        return None
 
     # --- permission grants --------------------------------------------------
 

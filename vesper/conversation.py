@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 
 from . import audit, learning, register
+from .brain import failures
 from .audio.mic import Microphone
 from .audio.speaker import Speaker
 from .audio.vad import EndpointConfig, Endpointer, VoiceActivity
@@ -65,6 +66,11 @@ from .undo import UndoStore
 from .wake import WakeGate
 
 _WORDS = re.compile(r"[a-z']+")
+
+# While the login is dead, how long to stay quiet between repeats of the one
+# sentence about it. Every occurrence is in the log regardless; a voice that
+# says the same complaint after each thing you say is unbearable.
+AUTH_NAG_S = 300.0
 
 # Handled locally, never sent to Claude. Telling something to be quiet should
 # not require a network round trip, and must work while it is mid-sentence.
@@ -232,8 +238,15 @@ class Conversation:
         # Tool calls that rode in on an approval given for something else.
         # Surfaced in `status`, where it should almost always be zero.
         self.unasked = 0
-        # Blocks that raised and were survived rather than fatal.
+        # Blocks that raised and were survived rather than fatal, and turns the
+        # CLI itself reported as failed.
         self.errors = 0
+        # The brain's login is dead and a respawn did not fix it. Set on the
+        # second failed attempt of one turn, or at start when `claude auth
+        # status` says not logged in. Cleared the moment that check says
+        # otherwise, so logging in again in any terminal is enough.
+        self._locked_out = False
+        self._locked_out_told_at = 0.0
         # How the session is going, and how the next turn should be pitched.
         self.register = register.Register()
         # The last thing asked, to notice it being asked again.
@@ -270,12 +283,32 @@ class Conversation:
         self.stt.load()
         if self.voiceprint is not None and self.voiceprint.enrolled:
             voiceprint.warm()
-        # resume, so a stored session id from a previous launch is actually used
-        self.brain.start(resume=bool(self.brain.session_id))
+        self.start_brain()
+        # The microphone runs either way: a Vesper that cannot hear can never
+        # notice that the login has come back.
         self.mic.start()
         self._running.set()
-        if self.config.greet_on_start:
+        if self.config.greet_on_start and not self._locked_out:
             self.speaker.say(f"{self.config.name} here. I'm listening.")
+
+    def start_brain(self) -> None:
+        """Spawn the brain, unless the CLI says it is not logged in.
+
+        Asked before spawning because, started from login after a long sleep,
+        the saved login can be gone (2026-09-04), and a child spawned on it
+        fails every turn while saying nothing useful. False is a fact; None is
+        "could not tell" and proceeds as before. Shared by the voice loop and
+        the typed modes, so `--say` on a dead login says so as well.
+        """
+        if self.brain.auth_status() is False:
+            self.ui.error(
+                "claude is not logged in on this machine; the brain was not started"
+            )
+            self._locked_out = True
+            self._complain_about_login()
+            return
+        # resume, so a stored session id from a previous launch is actually used
+        self.brain.start(resume=bool(self.brain.session_id))
 
     def stop(self) -> None:
         self._running.clear()
@@ -291,6 +324,11 @@ class Conversation:
         object would be handing out a race.
         """
         return tuple(self._transcript)
+
+    @property
+    def locked_out(self) -> bool:
+        """True while the brain's login is known dead and turns are not sent."""
+        return self._locked_out
 
     def status(self) -> dict:
         """What it has been doing, as plain data.
@@ -310,6 +348,7 @@ class Conversation:
             "undos": self.undos,
             "unasked": self.unasked,
             "errors": self.errors,
+            "locked_out": self._locked_out,
             "voice_rejections": self.voice_rejections,
             "echo_rejections": self.echo_rejections,
             "last_heard": self._last_heard,
@@ -1044,14 +1083,93 @@ class Conversation:
         self.register.note_turn(now.window.process)
         self._run_turn(frame_turn(text, context))
 
-    def _run_turn(self, payload: str, granted: ActionRequest | None = None) -> None:
+    def _complain_about_login(self) -> None:
+        """The one sentence about a dead login, at most once per AUTH_NAG_S."""
+        now = time.monotonic()
+        if self._locked_out_told_at and now - self._locked_out_told_at < AUTH_NAG_S:
+            return
+        self._locked_out_told_at = now
+        self._say(failures.spoken_line(failures.AUTH))
+
+    def _lockout_lifted(self) -> bool:
+        """While locked out, ask the CLI whether the login is back before
+        spending a turn on it.
+
+        `claude auth status` is a short subprocess, not a model call, so it is
+        the cheap question to ask on every utterance. False means still dead:
+        the turn is not sent, the failure is logged and counted, and the
+        sentence is repeated only after a long quiet. Anything else lifts the
+        lockout and respawns the brain, because a fresh child is what reads
+        the renewed credentials.
+        """
+        if self.brain.auth_status() is False:
+            self.register.note_failure()
+            self.errors += 1
+            self.ui.error("still not logged in; nothing was sent to the brain")
+            self._complain_about_login()
+            return False
+        self._locked_out = False
+        self.ui.info("the login is back; respawning the brain")
+        self.brain.restart()
+        return True
+
+    def _failed_turn(
+        self,
+        event: TurnComplete,
+        kind: str,
+        payload: str,
+        granted: ActionRequest | None,
+        retried: bool,
+    ) -> None:
+        """The CLI reported the turn as failed. Its words are never ours.
+
+        On 2026-09-04 the saved login expired while the laptop slept, every
+        turn came back `authentication_failed`, and the no-deltas fallback in
+        `_run_turn` read "Failed to authenticate: OAuth session expired" aloud
+        in Vesper's voice three times, counting each as a success. This is the
+        path that turn takes now: logged with the CLI's text, counted as a
+        failure, spoken as one plain sentence.
+
+        A dead login earns one respawn and one retry, because a fresh child
+        re-reads the credentials file and that is the only way a login renewed
+        elsewhere reaches this process. Anything else earns the sentence only:
+        a rate limit or an overloaded upstream is not fixed by a respawn.
+        """
+        self.register.note_failure()
+        self.errors += 1
+        detail = event.error_subtype or event.api_error or "error"
+        self.ui.error(f"brain turn failed ({kind}, {detail}): {event.text}")
+        if kind != failures.AUTH:
+            self._say(failures.spoken_line(kind))
+            return
+        if not retried:
+            self.brain.restart()
+            self._run_turn(payload, granted, retried=True)
+            return
+        self._locked_out = True
+        self._locked_out_told_at = 0.0
+        self._complain_about_login()
+
+    def _run_turn(
+        self,
+        payload: str,
+        granted: ActionRequest | None = None,
+        *,
+        retried: bool = False,
+    ) -> None:
         """Drive one turn end to end: speak it, then ask about anything it was
         stopped from doing.
 
         `granted` is the request a spoken yes just widened the allowlist for,
         and is set only on the turn that runs it. It is not used to permit
         anything, only to notice what the widening is actually spent on.
+
+        `retried` is set on the single second attempt after a dead-login
+        failure, so the ladder in `_failed_turn` cannot loop.
         """
+        if self._locked_out and not self._lockout_lifted():
+            return
+
         router = ChannelRouter()
         assembler = SentenceAssembler()
         started = time.monotonic()
@@ -1069,7 +1187,11 @@ class Conversation:
         extras: list[str] = []
 
         self.ui.thinking("thinking")
-        for event in self.brain.ask(payload):
+        # Held by name so a failed turn can close it before respawning: the
+        # real brain's `ask` holds its busy lock for as long as the generator
+        # is open, and a respawn from inside it would deadlock.
+        events = self.brain.ask(payload)
+        for event in events:
             if isinstance(event, TextDelta):
                 spoken_delta, screen_delta = router.feed(event.text)
                 screen_buffer += screen_delta
@@ -1128,6 +1250,12 @@ class Conversation:
                 return
 
             elif isinstance(event, TurnComplete):
+                kind = failures.classify(event)
+                if kind is not None:
+                    events.close()
+                    self._failed_turn(event, kind, payload, granted, retried)
+                    return
+
                 spoken_tail, screen_tail = router.flush()
                 for sentence in assembler.feed(spoken_tail):
                     if requests and is_refusal_noise(sentence):

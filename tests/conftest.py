@@ -46,12 +46,21 @@ class FakeBrain:
         self.grants: tuple[str, ...] = ()
         self.grant_history: list[tuple[str, ...]] = []
         self.revoked = False
+        # What `claude auth status` would say. None means "could not tell".
+        self.logged_in = True
+        self.restarts = 0
 
     def start(self, **kwargs):
         self.started = True
 
     def stop(self, *args, **kwargs):
         self.stopped = True
+
+    def restart(self):
+        self.restarts += 1
+
+    def auth_status(self):
+        return self.logged_in
 
     def interrupt(self):
         self.interrupted.set()

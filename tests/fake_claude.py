@@ -12,6 +12,8 @@ Behaviour is driven by environment variables so the test can shape one run:
     FAKE_CLAUDE_SESSION   session id to report
     FAKE_CLAUDE_GARBAGE   emit non-JSON lines too, as the real CLI sometimes does
     FAKE_CLAUDE_TOOL      report a tool call before answering
+    FAKE_CLAUDE_AUTH_FAIL fail this many turns first, the way a dead login does
+    FAKE_CLAUDE_LOGGED_IN what `auth status` answers: 1 (default) exits 0, 0 exits 1
 """
 
 import json
@@ -21,6 +23,11 @@ import time
 
 CHUNK = 5
 
+# Verbatim from the brain's transcript of 2026-09-04, when the saved login had
+# expired. The real CLI sends this as one assistant frame marked with the error
+# code, then an error result, and no deltas at all.
+AUTH_ERROR = "Failed to authenticate: OAuth session expired and could not be refreshed"
+
 
 def emit(frame):
     sys.stdout.write(json.dumps(frame) + "\n")
@@ -28,12 +35,18 @@ def emit(frame):
 
 
 def main() -> int:
+    if sys.argv[1:3] == ["auth", "status"]:
+        logged_in = os.environ.get("FAKE_CLAUDE_LOGGED_IN", "1") == "1"
+        emit({"loggedIn": logged_in})
+        return 0 if logged_in else 1
+
     replies = [r for r in os.environ.get("FAKE_CLAUDE_REPLIES", "").split("|") if r]
     delay = float(os.environ.get("FAKE_CLAUDE_DELAY_MS", "0")) / 1000.0
     crash_after = int(os.environ.get("FAKE_CLAUDE_CRASH", "0"))
     session = os.environ.get("FAKE_CLAUDE_SESSION", "11111111-2222-3333-4444-555555555555")
     garbage = os.environ.get("FAKE_CLAUDE_GARBAGE") == "1"
     tool = os.environ.get("FAKE_CLAUDE_TOOL", "")
+    auth_fail = int(os.environ.get("FAKE_CLAUDE_AUTH_FAIL", "0"))
 
     resumed = "--resume" in sys.argv
 
@@ -63,6 +76,27 @@ def main() -> int:
         turns += 1
         if crash_after and turns > crash_after:
             return 3
+
+        if turns <= auth_fail:
+            emit({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": AUTH_ERROR}]},
+                "error": "authentication_failed",
+                "isApiErrorMessage": True,
+            })
+            emit({
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "result": AUTH_ERROR,
+                "session_id": session,
+                "num_turns": 1,
+                "total_cost_usd": 0.0,
+                "duration_api_ms": 0,
+                "permission_denials": [],
+                "usage": {},
+            })
+            continue
 
         reply = replies.pop(0) if replies else "Nothing to report."
 

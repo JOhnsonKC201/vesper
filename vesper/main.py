@@ -504,7 +504,7 @@ def run_text(cfg: config_module.Config, one_shot: str = "") -> int:
         wake="type and press enter",
         cwd=cfg.brain_cwd(),
     )
-    conversation.brain.start(resume=bool(conversation.brain.session_id))
+    conversation.start_brain()
     try:
         if one_shot:
             ui.heard(one_shot, addressed=True)
