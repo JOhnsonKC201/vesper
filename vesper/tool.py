@@ -489,8 +489,7 @@ def _resolve_target(tokens: list[str]) -> tuple[tuple[int, int] | None, str]:
     if found is not None:
         return found.center, repr(found.name or found.control_type)
     if others:
-        listing = "; ".join(e.describe() for e in others)
-        return None, f"{name!r} is ambiguous in {title!r}: {listing}. Click one by its X Y."
+        return None, hands.ambiguity_line(name, title, others)
     return None, f"nothing called {name!r} on {title!r}. Run vasper look and pick from the list."
 
 

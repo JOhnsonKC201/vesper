@@ -35,8 +35,15 @@ from dataclasses import dataclass
 # chord that opens a menu.
 _SEND_KEYS_SPECIAL = "^%+~(){}[]"
 
-# Modifiers the way a person or a model spells them, mapped to send_keys.
-_MODIFIERS = {"ctrl": "^", "control": "^", "alt": "%", "shift": "+", "win": "{VK_LWIN}"}
+# Modifiers the way a person or a model spells them, mapped to send_keys. These
+# three are prefixes: send_keys holds them for the key that follows.
+_MODIFIERS = {"ctrl": "^", "control": "^", "alt": "%", "shift": "+"}
+
+# The Windows key has no prefix form. `{VK_LWIN}` is a tap, and a tap of Win
+# opens Start, so `{VK_LWIN}p` opened Start and typed p into its search box:
+# that is what "extend my screen" would have done on 2026-09-07 had the click
+# been approved. A held key is spelled `{VK_LWIN down}...{VK_LWIN up}`.
+_HELD = {"win": "VK_LWIN", "windows": "VK_LWIN", "super": "VK_LWIN"}
 
 # Keys that need braces. Single printable characters do not.
 _NAMED_KEYS = {
@@ -45,7 +52,7 @@ _NAMED_KEYS = {
     "delete": "{DELETE}", "del": "{DELETE}", "home": "{HOME}", "end": "{END}",
     "up": "{UP}", "down": "{DOWN}", "left": "{LEFT}", "right": "{RIGHT}",
     "pgup": "{PGUP}", "pgdn": "{PGDN}", "pageup": "{PGUP}", "pagedown": "{PGDN}",
-    "insert": "{INSERT}",
+    "insert": "{INSERT}", "win": "{VK_LWIN}", "windows": "{VK_LWIN}",
     **{f"f{n}": "{F%d}" % n for n in range(1, 13)},
 }
 
@@ -89,16 +96,38 @@ def to_send_keys(combo: str) -> str:
     if not parts:
         raise ValueError("empty key")
     prefix = ""
+    held: list[str] = []
     for part in parts[:-1]:
-        if part not in _MODIFIERS:
+        if part in _MODIFIERS:
+            prefix += _MODIFIERS[part]
+        elif part in _HELD:
+            held.append(_HELD[part])
+        else:
             raise ValueError(f"{part!r} is not a modifier in {combo!r}")
-        prefix += _MODIFIERS[part]
     final = parts[-1]
     if final in _NAMED_KEYS:
-        return prefix + _NAMED_KEYS[final]
-    if len(final) == 1:
-        return prefix + escape_text(final)
-    raise ValueError(f"{final!r} is not a key this understands, in {combo!r}")
+        inner = prefix + _NAMED_KEYS[final]
+    elif len(final) == 1:
+        inner = prefix + escape_text(final)
+    else:
+        raise ValueError(f"{final!r} is not a key this understands, in {combo!r}")
+    for name in reversed(held):
+        inner = "{%s down}%s{%s up}" % (name, inner, name)
+    return inner
+
+
+def ambiguity_line(name: str, title: str, others: list["Element"]) -> str:
+    """What the brain reads when a name matches more than one control.
+
+    It used to say "click one by its X Y", which is how a tie gets broken by a
+    guess. Now it names the choices in a form that can be read out, and says
+    to ask. The persona's WHEN YOU ARE NOT SURE section is the other half.
+    """
+    listing = "; ".join(e.describe() for e in others)
+    return (
+        f"{name!r} matches {len(others)} controls in {title!r}: {listing}. "
+        "Ask which one."
+    )
 
 
 def glide_path(start: tuple[int, int], end: tuple[int, int],
