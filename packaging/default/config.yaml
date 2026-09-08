@@ -16,7 +16,7 @@ identity:
   wake_words: [vasper, vesper, jarvis]
   # Free text appended to the persona. This is the dial for how it feels.
   # Try: "Be a little sardonic. Never say sorry twice in one conversation."
-  personality: ""
+  personality: "Warm and easy to talk to, like a sharp friend who happens to know computers. Contractions, a light touch of humour when it fits, and my name now and then. Still brief."
 
 brain:
   executable: claude
@@ -110,8 +110,9 @@ voice:
   sapi_voice_hint: ""
   # How the voice is finished. natural is Piper untouched; jarvis adds a
   # composed delivery, a presence lift and a small room; broadcast is the
-  # same tone with no room, for headphones. Compare them with
-  # `python scripts/voice_ab.py`, which writes one wav per character.
+  # same tone with no room, for headphones; warm is tuned for the female
+  # voices (jenny_dioco, hfc_female), where jarvis turns thin. Compare them
+  # with `python scripts/voice_ab.py`, which writes one wav per character.
   #
   # This and `model` above are only the starting point. The tray dashboard
   # lists every voice on the machine, each model once per character plus

@@ -319,6 +319,27 @@ def test_revoking_puts_the_permission_back(brain_factory):
     assert "Write" not in " ".join(brain.config.argv("session", brain.grants))
 
 
+def test_a_standing_grant_survives_a_one_shot_revoke(brain_factory):
+    """The hands stand for the session; a yes to one file write in the middle
+    of it is handed back at the end of its turn without taking the hands with
+    it. Two slots, one allowlist."""
+    brain = brain_factory(replies=["Fine.", "Fine.", "Fine.", "Fine."])
+    collect(brain, "hello")
+    brain.grant(("Bash(vasper click:*)",), standing=True)
+    brain.grant(("Write",))
+    argv = " ".join(brain.config.argv("session", brain.grants))
+    assert "Bash(vasper click:*)" in argv and "Write" in argv
+
+    brain.revoke()
+    assert brain.grants == ("Bash(vasper click:*)",)
+    assert brain.standing == ("Bash(vasper click:*)",)
+    assert "Write" not in " ".join(brain.config.argv("session", brain.grants))
+
+    brain.revoke_standing()
+    assert brain.grants == () and brain.standing == ()
+    assert brain.alive, "the brain must come back up after the hands are taken back"
+
+
 def test_a_background_revoke_finishes_before_the_next_question(brain_factory):
     """The next turn must not race the respawn: if it won, it would run with a
     permission the user granted for something else.

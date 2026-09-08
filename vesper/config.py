@@ -159,8 +159,9 @@ class VoiceSettings:
     speed: float = 1.15
     volume: float = 0.9
     sapi_voice_hint: str = ""
-    # How the voice is finished: natural, jarvis or broadcast. See
-    # vesper/tts/shaping.py. `natural` is Piper untouched.
+    # How the voice is finished: natural, jarvis, broadcast or warm. See
+    # vesper/tts/shaping.py. `natural` is Piper untouched; `warm` is tuned for
+    # the female voices, where jarvis turns thin.
     character: str = "jarvis"
     # Where the dashboard writes the voice you clicked. Here rather than under
     # `eleven` because every engine can be picked in the window now, and a

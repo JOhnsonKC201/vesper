@@ -30,7 +30,16 @@ def test_literal_text_cannot_turn_into_a_menu_chord():
     ("ctrl+l", "^l"),
     ("ctrl l", "^l"),
     ("Ctrl+Enter", "^{ENTER}"),
-    ("win+d", "{VK_LWIN}d"),
+    ("ctrl+t", "^t"),
+    # The Windows key is held, not tapped. `{VK_LWIN}d` taps Win, which opens
+    # Start, then types d into its search box; that is what "extend my screen"
+    # produced on 2026-09-07 (`vasper key win+p`).
+    ("win+d", "{VK_LWIN down}d{VK_LWIN up}"),
+    ("win+p", "{VK_LWIN down}p{VK_LWIN up}"),
+    ("win+shift+s", "{VK_LWIN down}+s{VK_LWIN up}"),
+    ("windows+e", "{VK_LWIN down}e{VK_LWIN up}"),
+    # On its own it is a tap, and a tap of Win is how you open Start.
+    ("win", "{VK_LWIN}"),
 ])
 def test_hotkeys_become_send_keys_syntax(combo, sent):
     assert to_send_keys(combo) == sent
@@ -100,6 +109,20 @@ def test_two_exact_matches_is_an_ambiguity_not_a_coin_toss():
     found, others = find_element([element(0, "Delete"), element(1, "Delete")], "Delete")
     assert found is None
     assert [e.eid for e in others] == [0, 1]
+
+
+def test_an_ambiguous_name_is_reported_in_words_claude_can_relay():
+    """The old line told Claude to "click one by its X Y", which is how a tie
+    gets broken by a guess. The line now says to ask, and names the choices in
+    a form that can be read out."""
+    others = [
+        element(3, "Delete", "Button", (800, 630, 824, 650)),
+        element(7, "Delete", "MenuItem", (30, 110, 50, 130)),
+    ]
+    assert hands.ambiguity_line("Delete", "Explorer", others) == (
+        "'Delete' matches 2 controls in 'Explorer': [3] Button 'Delete' at 812,640; "
+        "[7] MenuItem 'Delete' at 40,120. Ask which one."
+    )
 
 
 def test_a_substring_is_used_when_it_is_the_only_candidate():

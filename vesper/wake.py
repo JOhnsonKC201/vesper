@@ -161,8 +161,24 @@ class WakeGate:
         self._engaged_until = 0.0
 
     def engage(self, now: float) -> None:
-        """Open the follow-up window. Called after Vesper replies."""
-        self._engaged_until = now + self.config.follow_up_window_s
+        """Open the follow-up window. Called after Vesper replies.
+
+        Never shortens a window that is already longer: a question can hold it
+        open past the follow-up length, and the re-engage that fires when his
+        voice stops must not pull that back in.
+        """
+        self._engaged_until = max(
+            self._engaged_until, now + self.config.follow_up_window_s
+        )
+
+    def hold_open(self, until: float) -> None:
+        """Keep the window open at least until `until`.
+
+        A question does this for as long as the question is live. On
+        2026-09-07 the window from the utterance ran out while the question it
+        led to was still being spoken, and the answer landed on nothing.
+        """
+        self._engaged_until = max(self._engaged_until, until)
 
     def disengage(self) -> None:
         self._engaged_until = 0.0

@@ -43,9 +43,13 @@ class FakeBrain:
         self.total_cost_usd = 0.0
         self.turn_count = 0
         self.tools_to_report: list[tuple[str, str]] = []
-        self.grants: tuple[str, ...] = ()
+        # Two slots, like the real brain: a one-shot grant handed back when
+        # the turn ends, and a standing one that outlives it.
+        self._one_shot: tuple[str, ...] = ()
+        self.standing: tuple[str, ...] = ()
         self.grant_history: list[tuple[str, ...]] = []
         self.revoked = False
+        self.standing_revoked = False
         # What `claude auth status` would say. None means "could not tell".
         self.logged_in = True
         self.restarts = 0
@@ -71,17 +75,33 @@ class FakeBrain:
     # Permission grants. Recorded rather than simulated: what matters to the
     # loop is that a yes widens the allowlist and that the widening is handed
     # back afterwards, both of which are observable here.
-    def grant(self, specs):
-        self.grants = tuple(specs)
-        self.grant_history.append(tuple(specs))
+    @property
+    def grants(self):
+        return tuple(dict.fromkeys(self.standing + self._one_shot))
+
+    @grants.setter
+    def grants(self, specs):
+        self._one_shot = tuple(specs)
+
+    def grant(self, specs, *, standing=False):
+        specs = tuple(specs)
+        self.grant_history.append(specs)
+        if standing:
+            self.standing = specs
+        else:
+            self._one_shot = specs
 
     def revoke(self):
-        self.grants = ()
+        self._one_shot = ()
 
     def revoke_soon(self):
         self.revoked = True
         self.revoke()
         return None
+
+    def revoke_standing(self):
+        self.standing_revoked = True
+        self.standing = ()
 
     def ask(self, text):
         self.asked.append(text)

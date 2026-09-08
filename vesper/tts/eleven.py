@@ -97,10 +97,19 @@ STOCK_PHRASES: tuple[str, ...] = (
     "Hang on.",
     "Let me check that.",
     "Give me a second.",
+    "Right, let me see.",
+    "Okay, looking.",
+    "Hmm, let me find out.",
+    "One sec.",
+    "Let me have a look.",
+    "On it.",
     "Still looking.",
     "Bear with me.",
     "Almost there.",
+    "Still on it.",
+    "Nearly there.",
     "I'm not keeping copies, so there's nothing to put back.",
+    "Okay, hands off. I'll ask next time.",
 )
 
 

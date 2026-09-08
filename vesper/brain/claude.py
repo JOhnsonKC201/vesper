@@ -145,9 +145,12 @@ class ClaudeBrain:
         self.last_turn: TurnComplete | None = None
         self.total_cost_usd: float = 0.0
         self.turn_count: int = 0
-        # Permissions the user granted out loud, live only for the process they
-        # were spawned with. Empty is the resting state and the safe one.
+        # Permissions the user granted out loud. The one-shot slot lives for
+        # the turn it was given for; the standing slot, the hands after a yes
+        # that named the session, lives until it is taken back or the process
+        # ends. Both empty is the resting state and the safe one.
         self._grants: tuple[str, ...] = ()
+        self._standing: tuple[str, ...] = ()
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -167,8 +170,15 @@ class ClaudeBrain:
 
     @property
     def grants(self) -> tuple[str, ...]:
-        """What the running process is currently permitted beyond reading."""
-        return self._grants
+        """What the running process is permitted beyond reading: the standing
+        grants and the one-shot grant together, as the allowlist carries them."""
+        return tuple(dict.fromkeys(self._standing + self._grants))
+
+    @property
+    def standing(self) -> tuple[str, ...]:
+        """The grants that outlive a turn. Empty unless the user said yes to
+        the hands for the session."""
+        return self._standing
 
     @staticmethod
     def _child_env() -> dict:
@@ -177,7 +187,7 @@ class ClaudeBrain:
     def start(self, *, resume: bool = False) -> None:
         if self.alive:
             return
-        argv = self.config.argv(self.session_id if resume else "", self._grants)
+        argv = self.config.argv(self.session_id if resume else "", self.grants)
         self._log("spawning brain: " + " ".join(argv[:8]) + " ...")
 
         env = child_env()
@@ -266,14 +276,20 @@ class ClaudeBrain:
 
     # --- permission grants --------------------------------------------------
 
-    def grant(self, specs) -> None:
-        """Widen the allowlist for the next turn, after a spoken yes.
+    def grant(self, specs, *, standing: bool = False) -> None:
+        """Widen the allowlist, after a spoken yes.
 
         The CLI fixes its allowlist at spawn, so a grant means a respawn. That
         is affordable precisely because it only happens when the user has just
         agreed to something: the conversation itself survives via --resume, and
         a second of process start is invisible next to the sentence Vesper is
         about to speak.
+
+        `standing` is for a yes given to the whole session, the hands after a
+        question that said "for the rest of the session". It is kept in its own
+        slot so that handing a one-shot grant back at the end of its turn
+        leaves the hands in place, and taking the hands back leaves a one-shot
+        grant alone.
         """
         specs = tuple(dict.fromkeys(s for s in specs if s))
         if not specs:
@@ -283,24 +299,47 @@ class ClaudeBrain:
         # it, and the old process's reader threads went on feeding a queue the
         # new process now owned.
         with self._busy:
-            self._grants = specs
-            self._log("granted for one turn: " + ", ".join(specs))
+            if standing:
+                self._standing = specs
+                self._log("granted until hands off: " + ", ".join(specs))
+            else:
+                self._grants = specs
+                self._log("granted for one turn: " + ", ".join(specs))
             self.stop()
             self.start(resume=bool(self.session_id))
 
     def revoke(self) -> None:
-        """Drop back to read-only. Called as soon as the approved turn ends.
+        """Hand the one-shot grant back. Called as soon as the approved turn ends.
 
         Not deferred to the next question: the ambient loop shares this brain,
-        and a grant left standing would let an unattended proactive turn use
-        permission the user gave for something else entirely.
+        and a grant left over by accident would let an unattended proactive
+        turn use permission the user gave for something else entirely. The
+        standing slot is the deliberate exception, and the proactive loop
+        refuses to run at all while any grant is live (`proactive._blocked`).
         """
         if not self._grants:
             return
         self._grants = ()
-        self._log("grants revoked, back to read only")
+        if self._standing:
+            self._log("one turn grant revoked, the hands still stand")
+        else:
+            self._log("grants revoked, back to read only")
         self.stop()
         self.start(resume=bool(self.session_id))
+
+    def revoke_standing(self) -> None:
+        """Take the standing grant back. This is "hands off", spoken.
+
+        Takes the busy lock like `grant` does: it is called from the audio
+        thread, and the ambient loop may be mid-turn on this same process.
+        """
+        if not self._standing:
+            return
+        with self._busy:
+            self._standing = ()
+            self._log("standing grant taken back, hands ask again")
+            self.stop()
+            self.start(resume=bool(self.session_id))
 
     def revoke_soon(self) -> threading.Thread:
         """Revoke in the background, behind the answer being spoken.

@@ -22,6 +22,7 @@ import time
 import numpy as np
 
 from vesper.audio.speaker import Speaker
+from vesper.brain.consent import ActionRequest
 from vesper.conversation import Conversation, ConversationConfig
 from vesper.wake import WakeConfig, WakeGate
 
@@ -294,6 +295,88 @@ def test_going_to_sleep_is_noticed_once_rather_than_every_block():
         conversation._wake_tick()
 
     assert conversation._in_exchange is False
+
+
+# --- but a question he is asking holds the window open ----------------------
+
+
+def _write_request() -> ActionRequest:
+    return ActionRequest(tool="Write", tool_input={"file_path": "C:/notes.txt"})
+
+
+def test_a_question_asked_late_in_the_window_is_still_answerable():
+    """On 2026-09-07 at 10:45:45 "extend my screen" opened the window. The turn
+    took nineteen seconds, the question was asked at 10:46:04, and at 10:46:10,
+    exactly twenty-five seconds after the utterance, the window closed and the
+    question was logged as ignored while it was still being spoken. The answer
+    at 10:46:20 landed on nothing.
+
+    Mutation that fails this: drop the `hold_open` from `_ask_consent`.
+    """
+    conversation, speaker, ui = _conversation()
+    now = time.monotonic()
+    conversation.wake.engage(now - 19.0)
+    conversation._awake = True
+    conversation._in_exchange = True
+
+    conversation._ask_consent(_write_request())
+    speaker.wait_until_idle(timeout=5.0)
+
+    assert conversation.wake.engaged(now + 7.0), "the old window would have closed at six"
+    assert conversation._in_exchange is True
+
+    conversation._wake_tick()
+    assert conversation._pending is not None, "the question lapsed while being asked"
+    assert not [d for d in ui.decisions if d[0] == "ignored"]
+
+    conversation._settle_consent("yes", echo=False, named=True)
+    speaker.wait_until_idle(timeout=5.0)
+    speaker.close()
+    assert conversation.approvals == 1
+
+
+def test_the_held_window_still_closes_after_the_consent_window():
+    """The hold is sized to the consent window, not forever."""
+    conversation, speaker, ui = _conversation()
+    conversation.wake.engage(time.monotonic())
+    conversation._ask_consent(_write_request())
+    speaker.wait_until_idle(timeout=5.0)
+    speaker.close()
+    conversation._wake_tick()
+    assert conversation._awake is True
+
+    conversation.wake._engaged_until = time.monotonic() - 0.1
+    conversation._wake_tick()
+
+    assert conversation._pending is None
+    assert ("ignored", "Write: C:/notes.txt") in ui.decisions
+
+
+def test_a_question_from_claude_keeps_the_window_open_longer():
+    """When he asks which one you meant, you need longer than a follow-up to
+    answer, and the answer must not need his name.
+
+    Mutation that fails this: drop the question hold from `_run_turn`.
+    """
+    conversation, speaker, _ = _conversation(
+        ["Vesper delete the file"],
+        replies=["Two Delete buttons here. The toolbar one or the menu one?"],
+    )
+    conversation._on_utterance(_audio())
+    speaker.wait_until_idle(timeout=5.0)
+    speaker.close()
+    assert conversation.wake.engaged(time.monotonic() + 30.0)
+    assert conversation._in_exchange is True
+
+
+def test_a_plain_answer_from_claude_keeps_the_ordinary_window():
+    conversation, speaker, _ = _conversation(
+        ["Vesper delete the file"], replies=["Right."]
+    )
+    conversation._on_utterance(_audio())
+    speaker.wait_until_idle(timeout=5.0)
+    speaker.close()
+    assert not conversation.wake.engaged(time.monotonic() + 30.0)
 
 
 # --- and you can see which he is --------------------------------------------
@@ -603,3 +686,66 @@ def test_open_mic_reports_itself_as_awake():
     gate = WakeGate(WakeConfig(require_wake_word=False))
     assert gate.engaged(now=0.0) is False
     assert gate.awake(now=0.0) is True
+
+
+# --- taking the hands back needs no name ------------------------------------
+
+
+def test_hands_off_needs_no_name():
+    """Like a no: making someone say a name before they may stop something is
+    the wrong way round, and stopping cannot cause harm."""
+    conversation, speaker, ui = _conversation()
+    conversation._standing = {"hands": 0.0}
+
+    handled = conversation._handle_local("hands off", named=False)
+    speaker.wait_until_idle(timeout=5.0)
+    speaker.close()
+
+    assert handled is True
+    assert conversation.hands_standing is False
+    assert conversation.brain.standing_revoked
+    assert speaker.voice.lines[-1] == "Okay, hands off. I'll ask next time."
+    assert ("hands-off", "hands") in ui.decisions
+
+
+def test_bare_sleep_and_quiet_are_local():
+    """Tonight "Vasper sleep." and "Vasper, quiet." both went to Claude, cost
+    a turn each, and got an answer instead of silence."""
+    conversation, speaker, _ = _conversation()
+    conversation.wake.engage(time.monotonic())
+
+    assert conversation._handle_local("sleep") is True
+    # Mute barges in on whatever is being said, so let "Sleeping." land first.
+    speaker.wait_until_idle(timeout=5.0)
+    assert conversation._handle_local("quiet") is True
+    speaker.wait_until_idle(timeout=5.0)
+    speaker.close()
+
+    assert not conversation.wake.engaged(time.monotonic())
+    assert speaker.voice.lines[-2:] == ["Sleeping.", "Quiet from now on."]
+    assert conversation.brain.asked == []
+
+
+# --- the holding phrases do not repeat ----------------------------------------
+
+
+def test_a_filler_is_not_repeated_within_three():
+    """Avoiding only the previous one meant "Hang on." and "One moment." could
+    alternate for a whole evening, which is the robotic thing the fillers exist
+    to avoid."""
+    from vesper.brain.persona import THINKING_FILLERS
+
+    conversation, speaker, _ = _conversation()
+    speaker.close()
+    recent: list[str] = []
+    for _ in range(60):
+        chosen = conversation._filler(THINKING_FILLERS)
+        assert chosen not in recent[-3:], recent[-4:]
+        recent.append(chosen)
+
+
+def test_a_small_pool_still_yields_a_filler():
+    conversation, speaker, _ = _conversation()
+    speaker.close()
+    for _ in range(6):
+        assert conversation._filler(("A.", "B.")) in ("A.", "B.")

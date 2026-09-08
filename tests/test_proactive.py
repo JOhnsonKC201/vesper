@@ -179,6 +179,16 @@ def test_silent_during_a_conversation():
     assert brain.prompts == []
 
 
+def test_silent_while_a_permission_is_standing():
+    """The hands can stand for a whole session now. An unattended remark that
+    ran with them could move the mouse while nobody asked, so while any grant
+    is live the loop does not consult Claude at all."""
+    loop, brain, spoken = build(answers=["Hi!"], config=cfg(min_interval_s=0))
+    brain.grants = ("Bash(vasper click:*)",)
+    assert drive(loop, snapshot(cpu=10), snapshot(cpu=99)) == ""
+    assert brain.prompts == []
+
+
 def test_silent_during_quiet_hours():
     loop, brain, _ = build(
         answers=["Wake up!"],

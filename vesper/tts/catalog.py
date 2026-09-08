@@ -26,7 +26,7 @@ from pathlib import Path
 # rather than alphabetically: the configured default first. `test_catalog`
 # asserts this stays in step with PRESETS, so adding a fourth there and
 # forgetting it here fails rather than silently hiding it.
-DELIVERIES = ("jarvis", "natural", "broadcast")
+DELIVERIES = ("jarvis", "natural", "broadcast", "warm")
 
 # Piper names every model `<locale>-<voice>-<quality>.onnx`, so the locale is
 # free information. Only the ones a British-English install is likely to have
