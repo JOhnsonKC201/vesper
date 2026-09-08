@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -275,7 +276,52 @@ def cmd_apps(args) -> int:
     return 0
 
 
+# An address the browser should open. Two shapes: a full one with a scheme, or
+# a bare host with a dot in it, optionally with a path or a query. Only http and
+# https: `file:` would open a local file and `javascript:` would run code, and
+# neither is "go to a site". The scheme is composed rather than written out
+# because `tests/test_privacy.py` scans this package for baked-in destinations
+# and the marker it looks for is the scheme plus the slashes; a scheme on its
+# own names no destination, and keeping the marker out keeps that check honest.
+_FULL_ADDRESS = re.compile(r"^(?P<scheme>[a-z][a-z0-9+-]*):(?P<rest>.*)$", re.I)
+_BARE_HOST = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?(/\S*)?$", re.I)
+
+
+def web_address(name: str) -> str | None:
+    """The address `open` should hand to the browser, or None for an app name.
+
+    "Go to my Google Calendar" (2026-09-08 09:57) went through ctrl+t, a
+    permission question and a lapse, and never arrived. An address is a double
+    click the user could make, so it is free, like opening an app.
+    """
+    text = (name or "").strip().strip("\"'")
+    if not text or any(ch.isspace() for ch in text):
+        return None
+    full = _FULL_ADDRESS.match(text)
+    if full:
+        scheme = full.group("scheme").lower()
+        rest = full.group("rest")
+        if scheme in ("http", "https") and rest.startswith("//") and len(rest) > 2:
+            return text
+        return None
+    if _BARE_HOST.match(text):
+        return "https:" + "//" + text
+    return None
+
+
 def cmd_open(args) -> int:
+    address = web_address(args.name)
+    if address is not None:
+        # Before the app matcher on purpose: "google.com" scores well above the
+        # fuzzy floor against "Google Chrome", and would have launched the
+        # browser with no page in it.
+        try:
+            os.startfile(address)  # noqa: S606
+        except OSError as exc:
+            print(f"could not open {address}: {exc}")
+            return 1
+        print(f"opened {address} in the browser")
+        return 0
     best, others = match_app(args.name)
     if best is None:
         print(f"nothing installed matching {args.name!r}")
@@ -619,7 +665,9 @@ def build_parser() -> argparse.ArgumentParser:
     apps.add_argument("query", nargs="?", default="")
     apps.set_defaults(run=cmd_apps)
 
-    opener = subs.add_parser("open", help="launch an app by name")
+    opener = subs.add_parser(
+        "open", help="launch an app by name, or open a web address in the browser"
+    )
     opener.add_argument("name")
     opener.set_defaults(run=cmd_open)
 

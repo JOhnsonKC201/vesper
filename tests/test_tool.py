@@ -164,6 +164,49 @@ def test_the_runners_up_come_back_too(monkeypatch):
     assert [o.stem for o in others] == ["Code Insiders", "Codec Pack"]
 
 
+# --- open takes a web address too -------------------------------------------
+
+
+@pytest.mark.parametrize("said, address", [
+    ("calendar.google.com", "https://calendar.google.com"),
+    ("mail.google.com/mail/u/0", "https://mail.google.com/mail/u/0"),
+    ("google.com/search?q=weather+baltimore", "https://google.com/search?q=weather+baltimore"),
+    ("https://calendar.google.com/", "https://calendar.google.com/"),
+    ("http://localhost:8000/docs", "http://localhost:8000/docs"),
+    ('"calendar.google.com"', "https://calendar.google.com"),
+])
+def test_a_web_address_is_recognised(said, address):
+    """"Go to my Google Calendar" (2026-09-08 09:57) went through ctrl+t and a
+    permission question, and never arrived. An address is a double click the
+    user could make, so it is free, like opening an app."""
+    assert tool.web_address(said) == address
+
+
+@pytest.mark.parametrize("said", [
+    "chrome", "notepad", "visual studio code", "Google Chrome",
+    "file:///C:/Users/johns/secrets.txt", "javascript:alert(1)", "ftp://x.y",
+    "", "   ", "calendar google com", "my notes.txt",
+])
+def test_an_app_name_or_an_unsafe_scheme_is_not_a_web_address(said):
+    assert tool.web_address(said) is None
+
+
+def test_open_sends_a_web_address_to_the_browser_not_the_matcher(monkeypatch, capsys):
+    """"google.com" fuzzy matches "Google Chrome" well above the floor, so the
+    address has to be recognised before the app matcher ever sees it."""
+    import argparse
+
+    launched = []
+    monkeypatch.setattr(tool.os, "startfile", launched.append, raising=False)
+    monkeypatch.setattr(tool, "installed_apps", lambda: [Path("Google Chrome.lnk")])
+
+    code = tool.cmd_open(argparse.Namespace(name="calendar.google.com"))
+
+    assert code == 0
+    assert launched == ["https://calendar.google.com"]
+    assert capsys.readouterr().out.strip() == "opened https://calendar.google.com in the browser"
+
+
 # --- housekeeping -----------------------------------------------------------
 
 

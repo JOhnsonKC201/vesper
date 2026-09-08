@@ -608,12 +608,12 @@ class Conversation:
             self.ui.discarded(transcript.rejected_reason or "unclear")
             return
 
-        if self._is_own_voice(transcript.text):
+        result = self.wake.check(transcript.text, time.monotonic())
+        if self._is_own_voice(transcript.text) and not self._answers_my_question(result):
             self.echo_rejections += 1
             self.ui.discarded("heard myself")
             return
 
-        result = self.wake.check(transcript.text, time.monotonic())
         self.ui.heard(transcript.text, addressed=result.triggered)
         if result.triggered:
             self._last_heard = transcript.text[:80]
@@ -714,6 +714,23 @@ class Conversation:
             return False
         overlap = len(now & before) / min(len(now), len(before))
         return overlap >= 0.6
+
+    def _answers_my_question(self, result) -> bool:
+        """A reply to the pending question that the echo filter must let through.
+
+        The question ends "Do I do this for you?", and "do" and "it" are in it,
+        so "Vesper, do it" overlapped it enough to be thrown away as Vesper's
+        own voice coming back through the speakers (2026-09-08 09:57, and the
+        question lapsed unanswered). Vesper never says its own name in a spoken
+        line, so an answer that carries the name cannot be an echo. A no needs
+        no name and can approve nothing, so it is let through too.
+        """
+        if self._pending is None or not result.triggered:
+            return False
+        answer = hear_answer(result.text)
+        if answer == NO:
+            return True
+        return answer in (YES, QUALIFIED) and result.reason == "wake-word"
 
     def _is_own_voice(self, text: str) -> bool:
         """Did the mic pick up Vesper's own speech coming out of the speakers?"""

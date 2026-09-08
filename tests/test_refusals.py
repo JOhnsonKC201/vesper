@@ -49,6 +49,14 @@ def test_no_dashes_in_the_spoken_wording():
         assert "—" not in text and "–" not in text
 
 
+def test_the_prompt_says_a_site_is_opened_by_its_address():
+    """"Go to my Google Calendar" is an address, not a typing task."""
+    prompt = build_system_prompt("Johnson", "Be terse.")
+    assert "vasper open calendar.google.com" in prompt
+    assert "A search is an address too" in prompt
+    assert "never through WebSearch or WebFetch when they can watch" in prompt
+
+
 def test_the_prompt_talks_like_a_person():
     """Sound more like a human: contractions, a short reaction, no scolding."""
     prompt = build_system_prompt("Johnson", "Be terse.")

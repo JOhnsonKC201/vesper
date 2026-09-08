@@ -716,6 +716,93 @@ def test_a_file_grant_during_a_standing_session_does_not_drop_the_hands():
     assert brain.grants == HANDS, "the hands survived the one-shot revoke"
 
 
+class RetryingBrain(FakeBrain):
+    """Refuses the same command twice in one turn, the way Claude did on
+    2026-09-08 09:57 with `vasper key ctrl+t`, then answers normally."""
+
+    def __init__(self, command="vasper key ctrl+t"):
+        super().__init__(["Calendar's one yes away.", "Done."])
+        self.command = command
+        self.turns_asked = 0
+
+    def ask(self, text):
+        self.turns_asked += 1
+        if self.turns_asked == 1:
+            self.asked.append(text)
+            for n in (1, 2):
+                yield PermissionNeeded(
+                    "Bash", "detail", tool_input={"command": self.command},
+                    tool_use_id=f"toolu_{n}",
+                )
+            yield TurnComplete(text=self.replies.pop(0), turns=1)
+            return
+        yield from super().ask(text)
+
+
+def test_the_same_refused_command_twice_is_one_question():
+    """Two tool_use ids, one command. It used to become "and there is one more
+    thing after it" with the twin logged as declined, which is a question about
+    a thing that does not exist."""
+    brain = RetryingBrain()
+    conv, speaker, ui, voice = _build(brain, ["Vesper go to my calendar"])
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    speaker.close()
+
+    assert voice.lines[-1] == (
+        "I want to use the mouse and keyboard to press ctrl t, and keep them for "
+        "the rest of the session. Do I do this for you?"
+    )
+    assert not [d for d in ui.decisions if d[0] == "declined"], ui.decisions
+
+
+def test_an_answer_with_the_name_is_not_an_echo():
+    """The question ends "Do I do this for you?", and "do" and "it" are in it,
+    so "Vesper, do it" overlapped it enough to be thrown away as Vesper's own
+    voice coming back through the speakers. Vesper never says its own name in
+    a spoken line, so an answer that carries the name cannot be an echo."""
+    brain = DenyingBrain(request_tool="Bash", request_input={"command": "vasper key ctrl+t"})
+    conv, speaker, ui, voice = _build(brain, ["Vesper go to my calendar", "Vesper do it"])
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    assert "Do I do this for you?" in voice.lines[-1]
+
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    speaker.close()
+
+    assert conv.echo_rejections == 0, "the answer was dropped as an echo"
+    assert conv.approvals == 1
+    assert conv._pending is None
+
+
+def test_the_question_coming_back_through_the_speakers_is_still_an_echo():
+    brain = DenyingBrain(request_tool="Bash", request_input={"command": "vasper key ctrl+t"})
+    conv, speaker, ui, voice = _build(brain, ["Vesper go to my calendar"])
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    question = voice.lines[-1]
+    conv.stt.queue = [question]
+
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    speaker.close()
+
+    assert conv.echo_rejections == 1
+    assert conv.approvals == 0
+    assert conv._pending is not None, "the echo must not lapse the question either"
+
+
+def test_one_yes_away_is_refusal_noise():
+    """Said live on 2026-09-08 before the real question: "Calendar's one yes
+    away, whenever you want to grant the mouse and keyboard." Two sentences
+    about the same permission, one of them wrong about how to give it."""
+    assert is_refusal_noise("Calendar's one yes away, whenever you want to grant the mouse and keyboard.")
+    assert is_refusal_noise("Say the word and I'll have the mouse and keyboard.")
+    assert not is_refusal_noise("The calendar is open.")
+    assert not is_refusal_noise("One more yes and the file is saved.")
+
+
 def test_the_scope_question_does_not_swallow_the_way_out():
     """`_is_own_voice` throws away an utterance that overlaps a line just
     spoken. If the question contained the words of the way out, saying them
