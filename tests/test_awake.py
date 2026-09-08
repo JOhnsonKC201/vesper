@@ -22,6 +22,7 @@ import time
 import numpy as np
 
 from vesper.audio.speaker import Speaker
+from vesper.brain.consent import ActionRequest
 from vesper.conversation import Conversation, ConversationConfig
 from vesper.wake import WakeConfig, WakeGate
 
@@ -294,6 +295,88 @@ def test_going_to_sleep_is_noticed_once_rather_than_every_block():
         conversation._wake_tick()
 
     assert conversation._in_exchange is False
+
+
+# --- but a question he is asking holds the window open ----------------------
+
+
+def _write_request() -> ActionRequest:
+    return ActionRequest(tool="Write", tool_input={"file_path": "C:/notes.txt"})
+
+
+def test_a_question_asked_late_in_the_window_is_still_answerable():
+    """On 2026-09-07 at 10:45:45 "extend my screen" opened the window. The turn
+    took nineteen seconds, the question was asked at 10:46:04, and at 10:46:10,
+    exactly twenty-five seconds after the utterance, the window closed and the
+    question was logged as ignored while it was still being spoken. The answer
+    at 10:46:20 landed on nothing.
+
+    Mutation that fails this: drop the `hold_open` from `_ask_consent`.
+    """
+    conversation, speaker, ui = _conversation()
+    now = time.monotonic()
+    conversation.wake.engage(now - 19.0)
+    conversation._awake = True
+    conversation._in_exchange = True
+
+    conversation._ask_consent(_write_request())
+    speaker.wait_until_idle(timeout=5.0)
+
+    assert conversation.wake.engaged(now + 7.0), "the old window would have closed at six"
+    assert conversation._in_exchange is True
+
+    conversation._wake_tick()
+    assert conversation._pending is not None, "the question lapsed while being asked"
+    assert not [d for d in ui.decisions if d[0] == "ignored"]
+
+    conversation._settle_consent("yes", echo=False, named=True)
+    speaker.wait_until_idle(timeout=5.0)
+    speaker.close()
+    assert conversation.approvals == 1
+
+
+def test_the_held_window_still_closes_after_the_consent_window():
+    """The hold is sized to the consent window, not forever."""
+    conversation, speaker, ui = _conversation()
+    conversation.wake.engage(time.monotonic())
+    conversation._ask_consent(_write_request())
+    speaker.wait_until_idle(timeout=5.0)
+    speaker.close()
+    conversation._wake_tick()
+    assert conversation._awake is True
+
+    conversation.wake._engaged_until = time.monotonic() - 0.1
+    conversation._wake_tick()
+
+    assert conversation._pending is None
+    assert ("ignored", "Write: C:/notes.txt") in ui.decisions
+
+
+def test_a_question_from_claude_keeps_the_window_open_longer():
+    """When he asks which one you meant, you need longer than a follow-up to
+    answer, and the answer must not need his name.
+
+    Mutation that fails this: drop the question hold from `_run_turn`.
+    """
+    conversation, speaker, _ = _conversation(
+        ["Vesper delete the file"],
+        replies=["Two Delete buttons here. The toolbar one or the menu one?"],
+    )
+    conversation._on_utterance(_audio())
+    speaker.wait_until_idle(timeout=5.0)
+    speaker.close()
+    assert conversation.wake.engaged(time.monotonic() + 30.0)
+    assert conversation._in_exchange is True
+
+
+def test_a_plain_answer_from_claude_keeps_the_ordinary_window():
+    conversation, speaker, _ = _conversation(
+        ["Vesper delete the file"], replies=["Right."]
+    )
+    conversation._on_utterance(_audio())
+    speaker.wait_until_idle(timeout=5.0)
+    speaker.close()
+    assert not conversation.wake.engaged(time.monotonic() + 30.0)
 
 
 # --- and you can see which he is --------------------------------------------

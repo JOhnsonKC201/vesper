@@ -73,6 +73,28 @@ def test_disengage_closes_the_window_immediately():
     assert gate.check("still there", now=101.0).triggered is False
 
 
+def test_a_hold_cannot_be_shortened_by_a_later_engage():
+    """A question holds the window open for as long as the question is live.
+    The re-engage that fires when his voice stops must not pull it back in.
+
+    Mutation that fails this: make `engage` assign instead of taking the max.
+    """
+    gate = WakeGate(WakeConfig(follow_up_window_s=25))
+    gate.hold_open(until=145.0)
+    gate.engage(now=100.0)
+    assert gate.engaged(140.0), "the hold was cut short by an ordinary engage"
+
+    gate.disengage()
+    assert not gate.engaged(101.0), "disengage must still close everything"
+
+
+def test_engage_never_moves_the_window_backwards():
+    gate = WakeGate(WakeConfig(follow_up_window_s=25))
+    gate.engage(now=100.0)
+    gate.engage(now=90.0)
+    assert gate.engaged(124.0)
+
+
 def test_open_mic_mode_accepts_everything():
     gate = WakeGate(WakeConfig(require_wake_word=False))
     assert gate.check("no name needed", now=0.0).triggered is True

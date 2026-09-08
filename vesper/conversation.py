@@ -772,6 +772,14 @@ class Conversation:
         self._pending = request
         self._pending_at = time.monotonic()
         self._pending_condition = ""
+        # The question opens its own window, sized to the consent window so
+        # the two lapse together. The turn can end long after the utterance
+        # that started it: on 2026-09-07 a nineteen second turn asked its
+        # question six seconds before the follow-up window closed, and the
+        # question went to sleep, logged as ignored, while it was still being
+        # spoken.
+        self._in_exchange = True
+        self.wake.hold_open(self._pending_at + self.config.consent_window_s)
         self.ui.permission(request.tool, request.written())
         question = f"I want to {request.spoken()}. Do I do this for you?"
         if others:
@@ -808,6 +816,7 @@ class Conversation:
             if echo:
                 self.ui.heard(text, addressed=True)
             self._pending_at = time.monotonic()
+            self.wake.hold_open(self._pending_at + self.config.consent_window_s)
             self._pending_condition = text.strip()
             self._say("That came with a condition, and I only act on a plain "
                       "answer. Tell me again without one.")
@@ -1247,6 +1256,9 @@ class Conversation:
         said_filler = False
         said_second_filler = False
         screen_buffer = ""
+        # The last thing Claude said, fillers excluded. If it ends in a question
+        # mark he is waiting on an answer, and the window is held open for it.
+        last_spoken = ""
 
         requests: list[ActionRequest] = []
         seen: set[str] = set()
@@ -1278,6 +1290,7 @@ class Conversation:
                     if spoke_at is None:
                         spoke_at = time.monotonic()
                     spoken_anything = True
+                    last_spoken = sentence
                     self._say(sentence)
 
             elif isinstance(event, ToolStarted):
@@ -1330,6 +1343,7 @@ class Conversation:
                     if requests and is_refusal_noise(sentence):
                         continue
                     spoken_anything = True
+                    last_spoken = sentence
                     self._say(sentence)
                 leftover = (screen_buffer + screen_tail).strip()
                 if leftover:
@@ -1339,6 +1353,7 @@ class Conversation:
                     if spoke_at is None:
                         spoke_at = time.monotonic()
                     spoken_anything = True
+                    last_spoken = tail
                     self._say(tail)
 
                 # Fallback for a turn that produced no streaming deltas at all.
@@ -1355,6 +1370,7 @@ class Conversation:
                         fallback = _without_refusal_noise(fallback)
                     if fallback:
                         spoke_at = spoke_at or time.monotonic()
+                        last_spoken = fallback
                         self._say(fallback)
 
                 self.register.note_success()
@@ -1365,6 +1381,16 @@ class Conversation:
                 )
                 if extras:
                     self._report_unasked(extras)
+
+                if not requests and last_spoken.rstrip().endswith("?"):
+                    # He asked something: which of two buttons, which file, what
+                    # was meant. The answer needs longer than a follow-up, and
+                    # it must not need his name, so the window is held open as
+                    # long as a consent question would be.
+                    self._in_exchange = True
+                    self.wake.hold_open(
+                        time.monotonic() + self.config.consent_window_s
+                    )
 
                 if requests and self.config.consent_enabled:
                     # Only the first is put to the user; the rest are recorded
