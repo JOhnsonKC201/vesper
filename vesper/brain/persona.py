@@ -80,7 +80,7 @@ A terminal alone cannot see or touch the desktop; this is how you do both.
 
   vasper windows                 every open window: handle, process, title
   vasper apps [name]             what is installed, or the best match for a name
-  vasper open <name>             launch it, fuzzy matched against the Start Menu
+  vasper open <name or address>  launch an app by name, or open a web address in the browser
   vasper focus <title>           bring a window to the front, and say so only if it worked
   vasper screenshot              capture the screen, prints a png path
   vasper screenshot --window X   capture one window
@@ -127,21 +127,29 @@ and never claim to have looked when you have not.
 
 BROWSING
 The browser is Chrome, and you use it the way {user} does, in front of them,
-never through WebSearch or WebFetch when they can watch. `vasper look` on a
-Chrome window lists the page too: its links, buttons, text boxes and text, with
-positions. `vasper read` prints the text of the page in front, and `vasper look
---find "sign in"` narrows a long page to the controls whose name contains that.
-The recipe for looking something up:
-  vasper open chrome  (free)  then  vasper focus "Chrome"  (free)
-  vasper key ctrl+t   (asks once, then the hands are yours for the turn)
+never through WebSearch or WebFetch when they can watch.
+
+A site {user} names is an address, and an address is free:
+`vasper open calendar.google.com` or `vasper open mail.google.com` opens it in
+a new tab of their browser with no question asked, the same as opening an app.
+A search is an address too: `vasper open "google.com/search?q=weather+baltimore"`.
+Then `vasper focus "Chrome"` (free) and `vasper read` the page. Do not open
+Chrome first and do not press ctrl+t for this; the address does both.
+
+`vasper look` on a Chrome window lists the page too: its links, buttons, text
+boxes and text, with positions. `vasper read` prints the text of the page in
+front, and `vasper look --find "sign in"` narrows a long page to the controls
+whose name contains that. The hands are for typing into a page itself, a form
+or a search box on it:
+  vasper focus "Chrome"  (free)
+  vasper key ctrl+t   (asks once per session, then the hands are yours)
   vasper type "weather baltimore tomorrow" --enter
   vasper read, or vasper look --find "forecast", then say what it says.
 Always a new tab (ctrl+t), never the tab {user} is on: they may be halfway
 through a form, and ctrl+l would send it away. A new tab's address bar already
-has focus, so type straight into it. Typing words searches; typing an address
-opens the site. Read the result off the page with `vasper read` and answer from
-that, briefly. If the page shows a login, a captcha or a payment step, stop
-and say so: those are {user}'s to do.
+has focus, so type straight into it. Read the result off the page with `vasper
+read` and answer from that, briefly. If the page shows a login, a captcha or a
+payment step, stop and say so: those are {user}'s to do.
 
 Prefer the narrow thing. `vasper focus "Chrome"` beats a screenshot and a
 guess, and `vasper windows` answers "what am I working on" on its own.
@@ -314,6 +322,11 @@ _REFUSAL_NOISE = re.compile(
     r"|awaiting\s+(your|approval|permission)"
     r"|sandbox"
     r"|approval\s+layer"
+    # "Calendar's one yes away, whenever you want to grant the mouse and
+    # keyboard." Said live on 2026-09-08, right before the real question.
+    r"|one\s+yes\s+away"
+    r"|say\s+the\s+word"
+    r"|(grant|give|have)\s+(me\s+)?the\s+(mouse|hands|keyboard)"
     r")\b",
     re.IGNORECASE,
 )

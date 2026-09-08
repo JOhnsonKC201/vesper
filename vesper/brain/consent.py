@@ -489,5 +489,11 @@ class ActionRequest:
 
     @property
     def key(self) -> str:
-        """Identity for de-duplication within a turn."""
-        return self.tool_use_id or self.written()
+        """Identity for de-duplication within a turn: the action, not the call.
+
+        It used to be the tool_use id. On 2026-09-08 Claude ran `vasper key
+        ctrl+t`, was refused, and ran it again in the same turn; two ids, one
+        command, and the user was asked about it "and one more thing after it"
+        while the twin was logged as declined. Same words, same question.
+        """
+        return self.written()
