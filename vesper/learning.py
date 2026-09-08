@@ -77,18 +77,24 @@ _EXPLICIT = (
     (re.compile(r"^(?:please\s+)?remember(?:\s+that)?[,:]?\s+(.+)$", re.I), ""),
     (re.compile(r"^(?:from\s+now\s+on|going\s+forward|in\s+future)[,:]?\s+(.+)$", re.I), ""),
     (re.compile(r"^(?:make\s+sure|be\s+sure)(?:\s+(?:to|you))?[,:]?\s+(.+)$", re.I), ""),
-    (re.compile(r"^(?:i\s+(?:want|need)\s+you\s+to)\s+(.+)$", re.I), ""),
     (re.compile(r"^((?:always|never)\s+.+)$", re.I), ""),
-    (re.compile(r"^(?:don'?t|do\s+not)\s+(?:ever\s+)?(.+)$", re.I), "do not "),
     (re.compile(r"^stop\s+(.+ing\b.*)$", re.I), "stop "),
 )
 
 # Weaker. These say something went wrong, without saying what the rule is.
+#
+# "I want you to" and "don't" are down here too. They open a standing rule
+# sometimes and a one-off request far more often, and on 2026-09-07 the
+# one-offs won: "I want you to start up" and "don't clone it, just change to
+# some woman voice" were both written into every future system prompt after a
+# single hearing. Said twice, they count; said once, they are a request.
 _CORRECTION = (
     (re.compile(r"^(?:no[,.]?\s+)?i\s+(?:said|meant|asked\s+for)\s+(.+)$", re.I), ""),
     (re.compile(r"^(?:no|nope)[,.]?\s+(.+)$", re.I), ""),
     (re.compile(r"^(?:that'?s|thats)\s+(?:not|wrong|incorrect)\b[,.]?\s*(.*)$", re.I), ""),
     (re.compile(r"^actually[,.]?\s+(.+)$", re.I), ""),
+    (re.compile(r"^(?:i\s+(?:want|need)\s+you\s+to)\s+(.+)$", re.I), ""),
+    (re.compile(r"^(?:don'?t|do\s+not)\s+(?:ever\s+)?(.+)$", re.I), "do not "),
 )
 
 _FORGET_LAST = re.compile(
@@ -181,13 +187,24 @@ def extract(text: str) -> tuple[str, str] | None:
     return None
 
 
+# A rule fits in a breath. Two words ("start up") is a command; seventeen or
+# more is a request, a story, or the television. Both were stored as rules on
+# 2026-09-07 before these bounds existed.
+MIN_WORDS = 3
+MAX_WORDS = 16
+
+
 def _tidy(fragment: str, prefix: str = "") -> str:
     """Trim a captured fragment, and reject the ones that are not rules."""
     lesson = " ".join((fragment or "").split()).strip(" ,.;:")
     if len(lesson) < MIN_LENGTH or len(lesson) > MAX_LENGTH:
         return ""
-    # A question is a request, not a standing instruction.
-    if lesson.endswith("?"):
+    if not MIN_WORDS <= len(lesson.split()) <= MAX_WORDS:
+        return ""
+    # A question is a request, not a standing instruction. Anywhere in it: "I
+    # want you to find it. What's my girlfriend name? You have to find it" was
+    # kept because only the last character was checked.
+    if "?" in lesson:
         return ""
     return f"{prefix}{lesson}" if prefix else lesson
 

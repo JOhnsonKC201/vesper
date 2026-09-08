@@ -35,7 +35,6 @@ from vesper.learning import CORRECTION, EXPLICIT, Lessons, extract, wants_forget
          "Always confirm before you touch my repos"),
         ("Never read file paths out loud", "Never read file paths out loud"),
         ("Make sure to check the tests first", "check the tests first"),
-        ("I want you to use British spelling", "use British spelling"),
     ],
 )
 def test_an_explicit_instruction_is_kept_without_its_framing(said, expected):
@@ -96,11 +95,38 @@ def test_the_wake_word_is_not_part_of_the_rule():
         "always?",                        # a question is a request, not a rule
         "",
         "   ",
+        # Stored as permanent instructions on 2026-09-07, verbatim from the log.
+        "I want you to find it. What's my girlfriend name? You have to find it. "
+        "If you don't find it, I'll delete you",
+        "remember that, what? keep it short",   # a question anywhere, not just at the end
+        "I want you to start up",               # two words is a command, not a rule
+        "make sure to start up",
     ],
 )
 def test_ordinary_speech_does_not_become_a_permanent_rule(said):
     """The expensive failure. A wrong lesson is invisible and forever."""
     assert extract(said) is None, f"{said!r} would have been learned"
+
+
+def test_i_want_you_to_and_dont_are_weak_signals():
+    """"I want you to" and "don't" open one-off requests far more often than
+    rules: "I want you to start up", "don't clone it, just change to some
+    woman voice" (both 2026-09-07). They still count, but only once repeated,
+    the way a correction does."""
+    assert extract("I want you to use British spelling") == ("use British spelling", CORRECTION)
+    assert extract("don't read file paths out loud") == (
+        "do not read file paths out loud", CORRECTION
+    )
+    # The strong framings are still taken at their word.
+    assert extract("from now on use British spelling")[1] == EXPLICIT
+    assert extract("never read file paths out loud")[1] == EXPLICIT
+
+
+def test_a_rant_is_not_a_rule():
+    """A rule fits in a breath. Sixteen words is generous; a paragraph is a
+    request, a story, or the television."""
+    assert extract("from now on " + " ".join(["word"] * 17)) is None
+    assert extract("from now on " + " ".join(["word"] * 16)) is not None
 
 
 def test_something_too_long_to_be_a_rule_is_not_one():
