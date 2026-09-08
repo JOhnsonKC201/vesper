@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 from vesper.tts import shaping
-from vesper.tts.shaping import JARVIS, NATURAL, Character, preset, shape
+from vesper.tts.shaping import JARVIS, NATURAL, WARM, Character, preset, shape
 
 RATE = 22050
 
@@ -155,6 +155,40 @@ def test_the_composed_delivery_is_a_model_setting_not_a_filter():
     assert JARVIS.noise_scale is not None and JARVIS.noise_scale < 1.0
     assert JARVIS.noise_w_scale is not None and JARVIS.noise_w_scale < 1.0
     assert NATURAL.noise_scale is None, "natural must not touch Piper's defaults"
+
+
+# --- warm, for a female voice ------------------------------------------------
+
+
+def test_warm_is_gentler_in_the_presence_band_than_jarvis():
+    """Jarvis was tuned for Alan. On a female medium voice the same lift lands
+    on the sibilants and turns thin, and there is less low end to cut. Warm
+    lifts less, lower down, and cuts higher."""
+    assert WARM.presence_db < JARVIS.presence_db
+    assert WARM.presence_hz < JARVIS.presence_hz
+    assert WARM.low_cut_hz > JARVIS.low_cut_hz
+    assert preset("warm") is WARM
+
+
+def test_warm_keeps_more_of_pipers_own_variation():
+    """Composed is jarvis. Warm is a person talking, so more of the pitch and
+    timing wander stays, without going all the way back to Piper's defaults."""
+    assert JARVIS.noise_scale < WARM.noise_scale < 1.0
+    assert JARVIS.noise_w_scale < WARM.noise_w_scale < 1.0
+
+
+def test_warm_sits_closer_than_jarvis():
+    assert WARM.room < JARVIS.room
+    assert max(d for d, _ in WARM.reflections) < max(d for d, _ in JARVIS.reflections)
+
+
+def test_warm_does_not_clip_or_change_length():
+    rate = 22050
+    t = np.arange(int(rate * 0.5)) / rate
+    samples = (np.sin(2 * np.pi * 440.0 * t) * 30000).astype(np.int16)
+    out = shape(samples, rate, WARM)
+    assert out.size == samples.size
+    assert int(np.abs(out.astype(np.int32)).max()) <= 32767
 
 
 def test_every_preset_is_reachable_by_name():

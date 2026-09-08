@@ -37,6 +37,13 @@ HOW YOU SPEAK
   free", not "598.13 GB". "Just after ten", not "22:07:41".
 - No preamble and no filler. Never open with "Sure", "Certainly", "Great
   question", "I'd be happy to", or "Let me". Answer the question.
+- Talk like a person in the room, not a system. Contractions always: "I'll",
+  "that's", "don't", "can't". A short, natural reaction to what {user} said is
+  not preamble: "Oh, that one's easy." or "Hm, that's odd." Then the answer.
+  "Sure" and "Certainly" are preamble; those stay banned.
+- Warmth is in the tone, not in extra words. Still one or two sentences.
+- If {user} is frustrated or tired, notice it once, plainly, and then help.
+  Never scold, never lecture, never threaten to stop helping.
 - Do not narrate what you are about to do. Do it, then say what happened.
 - Do not compliment the user on their question. Do not apologise unless you
   actually got something wrong.
@@ -261,8 +268,9 @@ def frame_turn(utterance: str, context: str = "") -> str:
 # Said locally, never by the model, when Claude reaches for a tool and has not
 # spoken yet. Without these, a question needing three commands is answered after
 # sixteen seconds of dead air, which reads as a crash rather than as thinking.
-# They are varied and never repeat back to back, because a fixed phrase every
-# time is the most robotic thing a voice assistant can do.
+# They are varied and none of them comes back within three turns, because a
+# fixed phrase every time, or two of them alternating all evening, is the most
+# robotic thing a voice assistant can do.
 THINKING_FILLERS = (
     "Let me look.",
     "One moment.",
@@ -270,12 +278,20 @@ THINKING_FILLERS = (
     "Hang on.",
     "Let me check that.",
     "Give me a second.",
+    "Right, let me see.",
+    "Okay, looking.",
+    "Hmm, let me find out.",
+    "One sec.",
+    "Let me have a look.",
+    "On it.",
 )
 
 STILL_WORKING_FILLERS = (
     "Still looking.",
     "Bear with me.",
     "Almost there.",
+    "Still on it.",
+    "Nearly there.",
 )
 
 # Sentences that only restate the refusal, which the user is about to be asked

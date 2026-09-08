@@ -724,3 +724,28 @@ def test_bare_sleep_and_quiet_are_local():
     assert not conversation.wake.engaged(time.monotonic())
     assert speaker.voice.lines[-2:] == ["Sleeping.", "Quiet from now on."]
     assert conversation.brain.asked == []
+
+
+# --- the holding phrases do not repeat ----------------------------------------
+
+
+def test_a_filler_is_not_repeated_within_three():
+    """Avoiding only the previous one meant "Hang on." and "One moment." could
+    alternate for a whole evening, which is the robotic thing the fillers exist
+    to avoid."""
+    from vesper.brain.persona import THINKING_FILLERS
+
+    conversation, speaker, _ = _conversation()
+    speaker.close()
+    recent: list[str] = []
+    for _ in range(60):
+        chosen = conversation._filler(THINKING_FILLERS)
+        assert chosen not in recent[-3:], recent[-4:]
+        recent.append(chosen)
+
+
+def test_a_small_pool_still_yields_a_filler():
+    conversation, speaker, _ = _conversation()
+    speaker.close()
+    for _ in range(6):
+        assert conversation._filler(("A.", "B.")) in ("A.", "B.")

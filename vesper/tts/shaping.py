@@ -112,10 +112,32 @@ BROADCAST = replace(
     JARVIS, name="broadcast", reflections=(), room=0.0, air_db=2.5, drive=0.08
 )
 
+# Tuned by ear for a female medium voice (en_GB-jenny_dioco, en_US-hfc_female),
+# where the jarvis numbers, made for Alan, turn thin and sibilant: the 3.3 kHz
+# lift lands on the s sounds and there is little below 95 Hz to cut. Less lift,
+# lower down; more of Piper's own pitch and timing variation, so it reads as a
+# person talking rather than a composed announcer; and a smaller, nearer room.
+WARM = Character(
+    name="warm",
+    noise_scale=0.62,
+    noise_w_scale=0.72,
+    low_cut_hz=120.0,
+    presence_db=1.5,
+    presence_hz=2600.0,
+    presence_q=0.7,
+    air_db=1.0,
+    air_hz=9000.0,
+    reflections=((9.0, 0.5), (19.0, 0.3), (33.0, 0.15)),
+    room=0.10,
+    drive=0.06,
+    output_gain=0.86,
+)
+
 PRESETS: dict[str, Character] = {
     "natural": NATURAL,
     "jarvis": JARVIS,
     "broadcast": BROADCAST,
+    "warm": WARM,
 }
 
 

@@ -49,6 +49,14 @@ def test_no_dashes_in_the_spoken_wording():
         assert "—" not in text and "–" not in text
 
 
+def test_the_prompt_talks_like_a_person():
+    """Sound more like a human: contractions, a short reaction, no scolding."""
+    prompt = build_system_prompt("Johnson", "Be terse.")
+    assert "Contractions always" in prompt
+    assert "Never scold, never lecture" in prompt
+    assert "Still one or two sentences" in prompt
+
+
 def test_the_prompt_asks_once_and_asks_when_confused():
     """Ask me once about the hands, and ask me again when confused."""
     prompt = build_system_prompt("Johnson", "Be terse.")

@@ -236,7 +236,8 @@ class Conversation:
         self.turns = 0
         self.interruptions = 0
         self.echo_rejections = 0
-        self._last_filler = ""
+        # The last few holding phrases, so none comes back too soon.
+        self._recent_fillers: collections.deque[str] = collections.deque(maxlen=3)
         self.proactive = None  # set by main once the ambient loop exists
         # Instructions worth keeping across restarts. None disables it and
         # Vesper forgets everything at every restart, as he used to.
@@ -733,10 +734,15 @@ class Conversation:
     # --- answering ----------------------------------------------------------
 
     def _filler(self, pool: tuple[str, ...]) -> str:
-        """A short holding phrase, never the same one twice running."""
-        options = [f for f in pool if f != self._last_filler] or list(pool)
+        """A short holding phrase, not one heard in the last three turns.
+
+        Avoiding only the previous one let two phrases alternate for a whole
+        evening. A pool smaller than the memory falls back to the whole pool
+        rather than to silence.
+        """
+        options = [f for f in pool if f not in self._recent_fillers] or list(pool)
         chosen = random.choice(options)
-        self._last_filler = chosen
+        self._recent_fillers.append(chosen)
         return chosen
 
     def volunteer(self, line: str) -> None:
