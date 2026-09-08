@@ -2,7 +2,8 @@
 
 Vesper is the user's own voice assistant on the user's own machine. Every action
 in this module runs only after the user has said yes out loud to "use the mouse
-and keyboard" for that one turn, and every action is performed in front of them:
+and keyboard", once per session or once per turn, and every action is performed
+in front of them:
 the cursor travels visibly to where it will click, and text is typed one
 character at a time rather than pasted. The point is that a person watching can
 see what is about to happen and say stop.

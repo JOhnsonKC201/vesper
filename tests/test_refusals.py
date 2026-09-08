@@ -8,7 +8,8 @@ it does not have, so it promised a kind of help it could not give.
 """
 
 from vesper.brain.persona import (
-    DECLINED_NOTE, HANDS_APPROVED_NOTE, HANDS_ASKED_NOTE, build_system_prompt,
+    DECLINED_NOTE, HANDS_APPROVED_NOTE, HANDS_ASKED_NOTE, HANDS_STANDING_APPROVED_NOTE,
+    HANDS_STANDING_NOTE, build_system_prompt,
 )
 
 
@@ -41,8 +42,24 @@ def test_the_prompt_does_not_claim_a_mouse_or_keyboard():
 
 def test_no_dashes_in_the_spoken_wording():
     prompt = build_system_prompt("Johnson", "Be terse.")
-    for text in (prompt, DECLINED_NOTE, HANDS_APPROVED_NOTE, HANDS_ASKED_NOTE):
+    for text in (
+        prompt, DECLINED_NOTE, HANDS_APPROVED_NOTE, HANDS_ASKED_NOTE,
+        HANDS_STANDING_NOTE, HANDS_STANDING_APPROVED_NOTE,
+    ):
         assert "—" not in text and "–" not in text
+
+
+def test_the_prompt_asks_once_and_asks_when_confused():
+    """Ask me once about the hands, and ask me again when confused."""
+    prompt = build_system_prompt("Johnson", "Be terse.")
+    assert "WHEN YOU ARE NOT SURE" in prompt
+    assert "Never click a coordinate" in prompt
+    assert "rest of the session" in prompt
+    assert '"hands off"' in prompt
+    assert "Those seven" not in prompt, "read is free too, the count was wrong"
+    assert "for this session" in HANDS_STANDING_NOTE
+    assert "expires" not in HANDS_STANDING_NOTE
+    assert "It began with: {action}" in HANDS_STANDING_APPROVED_NOTE
 
 
 def test_the_prompt_says_to_click_by_name_and_that_asked_for_clicks_need_no_question():

@@ -15,10 +15,11 @@ import pytest
 from vesper import audit, config as config_module
 from vesper.brain.claude import BrainConfig
 from vesper.brain.consent import (
-    NO, QUALIFIED, UNCLEAR, YES, ActionRequest, _verbs, asked_for_hands, hear_answer,
-    request_after_refusal,
+    HAND_SPECS, NO, QUALIFIED, UNCLEAR, YES, ActionRequest, _verbs, asked_for_hands,
+    hear_answer, request_after_refusal,
 )
 from vesper.brain.persona import is_refusal_noise
+from vesper import conversation as conversation_module
 from vesper.brain.protocol import (
     PermissionNeeded,
     StreamParser,
@@ -564,10 +565,43 @@ def test_typed_input_answers_the_question_too():
     assert conv.approvals == 1
 
 
+HANDS = HAND_SPECS
+SCOPED_QUESTION = (
+    "I want to use the mouse and keyboard to type hello from vasper, and keep "
+    "them for the rest of the session. Do I do this for you?"
+)
+
+
+class StandingBrain(FakeBrain):
+    """Refuses a click for as long as the hands are not in the allowlist.
+
+    The real CLI behaves this way: a spec on the allowlist runs, a spec missing
+    from it comes back as a denial. So this is the brain that shows whether a
+    grant is still standing on the next turn, and whether taking it back makes
+    the question come back too.
+    """
+
+    def __init__(self, replies=None, command='vasper click "Send"'):
+        super().__init__(replies or [])
+        self.command = command
+
+    def ask(self, text):
+        if "Bash(vasper click:*)" not in self.grants:
+            self.asked.append(text)
+            yield PermissionNeeded(
+                "Bash", "detail", tool_input={"command": self.command},
+                tool_use_id=f"toolu_{len(self.asked)}",
+            )
+            yield TurnComplete(text=self.replies.pop(0), turns=1)
+            return
+        yield from super().ask(text)
+
+
 def test_a_yes_to_the_hands_grants_the_set_and_says_the_task_is_the_unit():
     """The first live run, 2026-09-05: told "do exactly this one action", Claude
     typed nothing after the yes and announced that typing would need a separate
-    go-ahead. The hands are one grant for the turn, and the note has to say so."""
+    go-ahead. The hands are one grant, the question says how long it lasts, and
+    the note says the task is the unit."""
     brain = DenyingBrain(
         request_tool="Bash", request_input={"command": 'vasper type "hello from vasper"'}
     )
@@ -577,22 +611,143 @@ def test_a_yes_to_the_hands_grants_the_set_and_says_the_task_is_the_unit():
     conv, speaker, ui, voice = _build(brain, ["Vesper put hello in that note", "Vesper yes"])
     conv._on_utterance(_audio())
     _settle(speaker)
-    assert voice.lines[-1] == (
-        "I want to use the mouse and keyboard to type hello from vasper. Do I do this for you?"
-    )
+    assert voice.lines[-1] == SCOPED_QUESTION
     conv._on_utterance(_audio())
     _settle(speaker)
     speaker.close()
 
-    assert brain.grant_history == [(
-        "Bash(vasper click:*)", "Bash(vasper type:*)", "Bash(vasper key:*)",
-        "Bash(vasper scroll:*)", "Bash(vasper move:*)",
-    )]
-    assert brain.grants == (), "handed back when the turn ended"
+    assert brain.grant_history == [HANDS]
+    assert brain.standing == HANDS, "the yes was to the session, so it stands"
+    assert brain.grants == HANDS
+    assert conv.hands_standing is True
+    assert ("standing", 'Bash: vasper type "hello from vasper"') in ui.decisions
     note = brain.asked[-1]
-    assert "mouse and keyboard for the rest of this turn" in note
-    assert "look again before the next action" in note
+    assert "for this session" in note
+    assert "It began with" in note
+    assert "looking with vasper look before and after" in note
+    assert "expires at the end of this turn" not in note
     assert "this one action" not in note
+
+
+def test_the_second_hands_turn_needs_no_question():
+    """Ask me once. The next click in the same session is covered by the yes
+    already given, so no question, no second grant, and a note saying so."""
+    brain = StandingBrain(["I could not do that.", "Done.", "Clicked Send."])
+    conv, speaker, ui, voice = _build(
+        brain, ["Vesper put hello in that note", "Vesper yes", "Vesper now click Send"]
+    )
+    for _ in range(3):
+        conv._on_utterance(_audio())
+        _settle(speaker)
+    speaker.close()
+
+    questions = [line for line in voice.lines if "Do I do this for you?" in line]
+    assert len(questions) == 1, voice.lines
+    assert brain.grant_history == [HANDS], "one grant for the whole session"
+    assert brain.asked[-1].startswith(
+        "[system] The user has already said yes to the mouse and keyboard"
+    )
+    assert voice.lines[-1] == "Clicked Send."
+    assert not [d for d in ui.decisions if d[0] == "asked-for"]
+
+
+def test_hands_off_takes_them_back_and_the_next_click_asks_again(tmp_path):
+    """The way out is spoken, local, and immediate. After it, the next click
+    is a question again."""
+    log = tmp_path / "actions.log"
+    brain = StandingBrain(["I could not do that.", "Done.", "I could not do that."])
+    conv, speaker, ui, voice = _build(
+        brain,
+        ["Vesper put hello in that note", "Vesper yes", "Vesper hands off",
+         "Vesper now click Send"],
+        audit_log=log,
+    )
+    for _ in range(3):
+        conv._on_utterance(_audio())
+        _settle(speaker)
+
+    assert voice.lines[-1] == "Okay, hands off. I'll ask next time."
+    assert brain.standing == () and brain.standing_revoked
+    assert conv.hands_standing is False
+    assert ("hands-off", "hands") in ui.decisions
+    assert "hands-off" in log.read_text(encoding="utf-8")
+
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    speaker.close()
+    assert voice.lines[-1].endswith(
+        ", and keep them for the rest of the session. Do I do this for you?"
+    )
+
+
+def test_a_file_grant_during_a_standing_session_does_not_drop_the_hands():
+    """A one-shot yes to a file write rides alongside the standing hands. It is
+    handed back when its turn ends; the hands are not."""
+
+    class Script(FakeBrain):
+        def __init__(self):
+            super().__init__(["Done.", "Saved."])
+            self.denials = [
+                {"command": 'vasper click "Send"'}, None, {"file_path": "C:/notes.txt"}, None,
+            ]
+
+        def ask(self, text):
+            denial = self.denials.pop(0)
+            if denial is None:
+                yield from super().ask(text)
+                return
+            self.asked.append(text)
+            tool = "Bash" if "command" in denial else "Write"
+            yield PermissionNeeded(tool, "detail", tool_input=denial, tool_use_id=str(len(self.asked)))
+            yield TurnComplete(text="I could not do that.", turns=1)
+
+    brain = Script()
+    conv, speaker, ui, voice = _build(
+        brain, ["Vesper put hello in that note", "Vesper yes", "Vesper save it to notes", "Vesper yes"]
+    )
+    for _ in range(4):
+        conv._on_utterance(_audio())
+        _settle(speaker)
+    speaker.close()
+
+    assert brain.grant_history == [HANDS, ("Write",)]
+    assert brain.revoked, "the file grant was handed back"
+    assert brain.standing == HANDS
+    assert brain.grants == HANDS, "the hands survived the one-shot revoke"
+
+
+def test_the_scope_question_does_not_swallow_the_way_out():
+    """`_is_own_voice` throws away an utterance that overlaps a line just
+    spoken. If the question contained the words of the way out, saying them
+    would be heard as an echo and dropped. This pins the wording."""
+    brain = DenyingBrain(
+        request_tool="Bash", request_input={"command": 'vasper type "hello from vasper"'}
+    )
+    conv, speaker, ui, voice = _build(brain, ["Vesper put hello in that note"])
+    conv._on_utterance(_audio())
+    _settle(speaker)
+    speaker.close()
+    assert voice.lines[-1] == SCOPED_QUESTION
+    for phrase in conversation_module._HANDS_OFF_PHRASES:
+        assert not conv._is_own_voice(phrase), f"{phrase!r} would be dropped as an echo"
+
+
+def test_asked_for_hands_while_standing_skips_the_respawn():
+    """Once the hands stand, a request that names the click needs neither a
+    question nor a second grant."""
+    brain = StandingBrain(["I could not do that.", "Done.", "Switched to the LinkedIn tab."])
+    conv, speaker, ui, voice = _build(
+        brain, ["Vesper put hello in that note", "Vesper yes", "Vesper click on the LinkedIn tab"]
+    )
+    for _ in range(3):
+        conv._on_utterance(_audio())
+        _settle(speaker)
+    speaker.close()
+
+    assert len(brain.grant_history) == 1
+    assert brain.asked[-1].startswith("[system] The user has already said yes")
+    assert not [d for d in ui.decisions if d[0] == "asked-for"]
+    assert voice.lines[-1] == "Switched to the LinkedIn tab."
 
 
 @pytest.mark.parametrize("said", [
@@ -648,6 +803,7 @@ def test_asking_for_the_click_yourself_needs_no_second_question(tmp_path):
         f"Bash(vasper {v}:*)" for v in ("click", "type", "key", "scroll", "move")
     )]
     assert brain.revoked and brain.grants == ()
+    assert brain.standing == (), "the user's words buy one turn, not a session"
     assert brain.asked[0].startswith("[system] The user's request below asks for a click")
     assert "click on the LinkedIn tab" in brain.asked[0]
     assert ("asked-for", "hands: click on the LinkedIn tab") in ui.decisions

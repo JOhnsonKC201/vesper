@@ -28,6 +28,12 @@ UNASKED = "unasked"
 # because no question was asked; recorded so the log still says why the mouse
 # moved.
 ASKED_FOR = "asked-for"
+# The hands, granted for the whole session after a question that said so. Later
+# clicks in the same session are covered by this line, not by new ones, which
+# is why the log can be quiet while the mouse is busy.
+STANDING = "standing"
+# The user took them back out loud. From here every click asks again.
+HANDS_OFF = "hands-off"
 
 
 def record(path: Path | str, decision: str, action: str, *, at: datetime | None = None) -> None:

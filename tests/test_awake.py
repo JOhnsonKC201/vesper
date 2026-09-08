@@ -686,3 +686,41 @@ def test_open_mic_reports_itself_as_awake():
     gate = WakeGate(WakeConfig(require_wake_word=False))
     assert gate.engaged(now=0.0) is False
     assert gate.awake(now=0.0) is True
+
+
+# --- taking the hands back needs no name ------------------------------------
+
+
+def test_hands_off_needs_no_name():
+    """Like a no: making someone say a name before they may stop something is
+    the wrong way round, and stopping cannot cause harm."""
+    conversation, speaker, ui = _conversation()
+    conversation._standing = {"hands": 0.0}
+
+    handled = conversation._handle_local("hands off", named=False)
+    speaker.wait_until_idle(timeout=5.0)
+    speaker.close()
+
+    assert handled is True
+    assert conversation.hands_standing is False
+    assert conversation.brain.standing_revoked
+    assert speaker.voice.lines[-1] == "Okay, hands off. I'll ask next time."
+    assert ("hands-off", "hands") in ui.decisions
+
+
+def test_bare_sleep_and_quiet_are_local():
+    """Tonight "Vasper sleep." and "Vasper, quiet." both went to Claude, cost
+    a turn each, and got an answer instead of silence."""
+    conversation, speaker, _ = _conversation()
+    conversation.wake.engage(time.monotonic())
+
+    assert conversation._handle_local("sleep") is True
+    # Mute barges in on whatever is being said, so let "Sleeping." land first.
+    speaker.wait_until_idle(timeout=5.0)
+    assert conversation._handle_local("quiet") is True
+    speaker.wait_until_idle(timeout=5.0)
+    speaker.close()
+
+    assert not conversation.wake.engaged(time.monotonic())
+    assert speaker.voice.lines[-2:] == ["Sleeping.", "Quiet from now on."]
+    assert conversation.brain.asked == []

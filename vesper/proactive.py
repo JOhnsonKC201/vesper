@@ -163,6 +163,11 @@ class ProactiveLoop:
         # Never talk over a conversation already in progress.
         if getattr(self.brain, "busy", False):
             return "mid conversation"
+        # Never run with a permission the user gave for something else. The
+        # hands can stand for a whole session, and an unattended remark that
+        # ran with them could move the mouse while nobody asked for anything.
+        if getattr(self.brain, "grants", ()):
+            return "permission standing"
         return ""
 
     def _remember(self, remark: str) -> None:

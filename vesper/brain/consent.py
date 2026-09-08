@@ -171,13 +171,14 @@ _INTERPRETERS = {
 # do not exist yet.
 _SUBCOMMAND_TOOLS = {"git", "npm", "pnpm", "yarn", "pip", "winget", "choco",
                      "docker", "gh", "vasper"}
-# The mouse and keyboard, which are granted together, for one turn. A task is
-# "click the address bar, type the search, press enter", and asking three
-# separate questions for it made the hands unusable, while the person is
-# sitting there watching each one happen. So the question is "use the mouse and
-# keyboard to <the first thing>" and a yes covers these five verbs until the
-# turn ends. Nothing else rides on it: `vasper open` stays free and `rm` stays
-# its own question.
+# The mouse and keyboard, which are granted together. A task is "click the
+# address bar, type the search, press enter", and asking three separate
+# questions for it made the hands unusable, while the person is sitting there
+# watching each one happen. So the question is "use the mouse and keyboard to
+# <the first thing>, and keep them for the rest of the session", and a yes
+# covers these five verbs until "hands off" or a restart. The user's own request
+# ("click on the LinkedIn tab") still buys one turn, not a session. Nothing else
+# rides on it: `vasper open` stays free and `rm` stays its own question.
 _HAND_VERBS = ("click", "type", "key", "scroll", "move")
 _HAND_SPECS = tuple(f"Bash(vasper {verb}:*)" for verb in _HAND_VERBS)
 

@@ -43,8 +43,9 @@ from .brain.consent import HAND_SPECS, QUALIFIED, asked_for_hands, request_after
 from .brain.persona import (
     APPROVED_NOTE,
     DECLINED_NOTE,
-    HANDS_APPROVED_NOTE,
     HANDS_ASKED_NOTE,
+    HANDS_STANDING_APPROVED_NOTE,
+    HANDS_STANDING_NOTE,
     INTERRUPTED_NOTE,
     STILL_WORKING_FILLERS,
     THINKING_FILLERS,
@@ -78,7 +79,7 @@ AUTH_NAG_S = 300.0
 # Handled locally, never sent to Claude. Telling something to be quiet should
 # not require a network round trip, and must work while it is mid-sentence.
 _MUTE_PHRASES = (
-    "be quiet", "shut up", "stop talking", "mute yourself", "mute",
+    "be quiet", "shut up", "stop talking", "mute yourself", "mute", "quiet",
     "stop interrupting", "leave me alone", "quiet please", "no more updates",
 )
 _UNMUTE_PHRASES = (
@@ -111,8 +112,23 @@ _SHUTDOWN_PHRASES = (
 _SLEEP_PHRASES = (
     "go to sleep", "sleep now", "go back to sleep", "nod off", "never mind",
     "forget it", "that's all", "thats all", "that is all", "we're done",
-    "were done", "that will be all",
+    "were done", "that will be all", "sleep",
 )
+
+# Spoken to take the hands back after a yes given for the session. Local, like
+# mute and undo, and for the same reason: the way out of a standing permission
+# must not depend on Claude being reachable or willing. A no never needs his
+# name, and neither does this.
+_HANDS_OFF_PHRASES = (
+    "hands off", "stop using the mouse", "stop using my mouse", "stop clicking",
+    "stop typing", "ask me first", "ask me before", "ask before you click",
+    "ask before you type", "give me back the mouse", "give me my mouse back",
+    "keep your hands off",
+)
+# What the first hands question adds. It must not contain the words of any
+# phrase above: `_is_own_voice` throws away an utterance that overlaps a line
+# just spoken, and "until you say hands off" would have swallowed "hands off".
+HANDS_SCOPE = ", and keep them for the rest of the session"
 
 
 def _matches(text: str, phrases: tuple[str, ...]) -> bool:
@@ -240,6 +256,11 @@ class Conversation:
         # but in front of me" is an instruction about how, and dropping it
         # while asking for a cleaner yes would be hearing half of it.
         self._pending_condition = ""
+        # Permissions given for the session rather than for one turn, by
+        # category, with when they were given. Only "hands" today. Runtime
+        # state on purpose: it is never written to disk or to the allowlist,
+        # so a restart asks again.
+        self._standing: dict[str, float] = {}
         self.approvals = 0
         self.refusals = 0
         self.undos = 0
@@ -372,7 +393,13 @@ class Conversation:
             # or bool ever appears in it.
             "voice": str(getattr(self.speaker.voice, "name", "")),
             "learned": len(self.lessons.items) if self.lessons is not None else 0,
+            "hands_standing": self.hands_standing,
         }
+
+    @property
+    def hands_standing(self) -> bool:
+        """Has the user said yes to the mouse and keyboard for this session?"""
+        return "hands" in self._standing
 
     def shutdown(self) -> None:
         """Ask the loop to end. Safe to call from any thread.
@@ -781,11 +808,15 @@ class Conversation:
         self._in_exchange = True
         self.wake.hold_open(self._pending_at + self.config.consent_window_s)
         self.ui.permission(request.tool, request.written())
-        question = f"I want to {request.spoken()}. Do I do this for you?"
+        # The hands are asked about once per session, and the question has to
+        # say so: a yes to "click Send" is not a yes to every click until
+        # bedtime unless the person was told that is what they were agreeing to.
+        scope = HANDS_SCOPE if request.is_hands else ""
+        question = f"I want to {request.spoken()}{scope}. Do I do this for you?"
         if others:
             more = "one more thing" if others == 1 else f"{others} more things"
             question = (
-                f"I want to {request.spoken()}, and there is {more} after it. "
+                f"I want to {request.spoken()}{scope}, and there is {more} after it. "
                 "Do I do this one for you?"
             )
         self._say(question)
@@ -881,8 +912,28 @@ class Conversation:
         self._say(sentence)
         return done
 
+    def _hands_off(self) -> None:
+        """Take the standing hands back: out loud, at once, and in the log.
+
+        Idempotent, and truthful either way: "hands off" when nothing stands
+        still means every click asks, which is what the sentence says.
+        """
+        self._standing = {k: v for k, v in self._standing.items() if k != "hands"}
+        self.ui.decision(audit.HANDS_OFF, "hands")
+        if self.config.audit_log is not None:
+            audit.record(self.config.audit_log, audit.HANDS_OFF, "hands")
+        # Spoken before the respawn, which takes a second or two, so the person
+        # is not left in silence wondering whether they were heard.
+        self._say("Okay, hands off. I'll ask next time.")
+        self.brain.revoke_standing()
+
     def _approve(self, request: ActionRequest, *, condition: str = "") -> None:
         """Grant exactly this action, run it, then hand the permission back.
+
+        The hands are the exception, and the question said so: a yes to "use
+        the mouse and keyboard ... and keep them for the rest of the session"
+        is a standing grant, kept until "hands off" or a restart. Everything
+        else is one action, one turn.
 
         `condition` is what they said when the first answer was a yes with a
         "but" on it. It rides along in the note so Claude hears the how, and it
@@ -898,7 +949,12 @@ class Conversation:
                 request.written(), request.tool, request.tool_input
             )
         self._say("Doing it.")
-        template = HANDS_APPROVED_NOTE if request.is_hands else APPROVED_NOTE
+        if request.is_hands:
+            self._standing = {**self._standing, "hands": time.monotonic()}
+            self._log_decision(audit.STANDING, request)
+            template = HANDS_STANDING_APPROVED_NOTE
+        else:
+            template = APPROVED_NOTE
         note = template.format(action=request.written())
         if condition:
             note += (
@@ -907,13 +963,14 @@ class Conversation:
                 "If it asks for anything beyond the approved action, stop and "
                 "say what else would be needed."
             )
-        self.brain.grant(request.grants())
+        self.brain.grant(request.grants(), standing=request.is_hands)
         try:
             self._run_turn(note, granted=request)
         finally:
-            # Always, including after an error or an interruption. A grant that
-            # outlives the action it was given for is the failure mode this
-            # whole design exists to prevent.
+            # Always, including after an error or an interruption. A one-shot
+            # grant that outlives the action it was given for is the failure
+            # mode this whole design exists to prevent. The standing slot is
+            # not touched by this, which is the point of having two.
             self.brain.revoke_soon()
 
     @staticmethod
@@ -993,6 +1050,10 @@ class Conversation:
             # to say nothing about the icon itself.
             self.wake.disengage()
             self._say("Sleeping.")
+            return True
+
+        if _matches(text, _HANDS_OFF_PHRASES):
+            self._hands_off()
             return True
 
         forget = learning.wants_forgetting(text) if self.lessons is not None else ""
@@ -1135,6 +1196,11 @@ class Conversation:
         )
         self.register.note_turn(now.window.process)
         payload = frame_turn(text, context)
+        if self.hands_standing:
+            # They said yes once, to the session. No question and no respawn:
+            # the allowlist already carries the hands, the note only says so.
+            self._run_turn(HANDS_STANDING_NOTE + "\n\n" + payload)
+            return
         if self.config.consent_enabled and not self._locked_out and asked_for_hands(text):
             self._run_with_hands(payload, text)
             return
