@@ -25,6 +25,37 @@ import numpy as np
 
 from . import accel
 
+# The other kind, and the reason the exact list below is not enough. Trained on
+# a great deal of video, Whisper answers noise with the end of a video, and
+# those are whole sentences rather than stock phrases, so they are too long for
+# the `duration_s < 2.0` rule and too varied to list. Straight out of the log:
+#
+#     HEARD Until next time, I'll talk to you again soon with Naoli Online.
+#     HEARD And apart from us, we have another failed entrepreneur.
+#
+# Only the first of those is catchable, and only this family is worth catching:
+# nobody says goodbye to a video at their desktop assistant. Matched at any
+# length, unlike the list below.
+_VIDEO_OUTRO = re.compile(
+    r"\b("
+    # A few words of thanks are allowed to pile up in between: the real ones
+    # run "thank you all so much for watching" as readily as "thanks for
+    # watching". Bounded so it cannot reach across a whole sentence.
+    r"thanks? (?:you )?(?:\w+ ){0,4}?for watching"
+    r"|thanks? for (?:listening|joining me|tuning in)"
+    r"|(?:don'?t forget to |please |remember to |be sure to )"
+    r"(?:like(?:,| and)? )?(?:comment(?:,| and)? )?subscribe"
+    r"|subscribe to (?:my|the|our) channel"
+    r"|until next time"
+    r"|see you (?:in the )?next (?:time|video|one)"
+    r"|see you (?:all )?(?:again )?(?:very )?soon"
+    r"|i'?ll (?:see|talk to) you (?:again )?(?:next time|soon|in the next)"
+    r"|(?:subtitles?|captions?|transcription) (?:by|provided by|from)"
+    r"|hit the (?:like )?button"
+    r")\b",
+    re.IGNORECASE,
+)
+
 # Whisper's greatest hits when handed silence or noise. Only applied to short
 # clips, where a genuine utterance of this text is implausible.
 HALLUCINATIONS = frozenset(
@@ -419,6 +450,12 @@ class Listener:
         # Stock filler, only on short clips. On a long one "thank you" is
         # probably a real thing somebody said.
         if transcript.duration_s < 2.0 and stripped in HALLUCINATIONS:
+            return "hallucination"
+
+        # The end of a video, at any length. This one has no duration rule
+        # because that is exactly what let it through: the log's example runs
+        # to eleven words. Nobody signs off from a video at their assistant.
+        if _VIDEO_OUTRO.search(stripped):
             return "hallucination"
         return ""
 

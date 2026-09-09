@@ -109,12 +109,23 @@ class LogFile:
         self.write("error", message)
 
 
-def attach(ui, log: LogFile):
+def attach(ui, log: LogFile, *, transcripts: bool = True):
     """Tee a TerminalUI's diagnostics into the log without changing the UI.
 
     Wrapping rather than editing `TerminalUI`: the terminal is the primary
     surface when there is one, and this must not change what it prints. It also
     keeps the log working for any other UI object, which is what the tests use.
+
+    `transcripts=False` keeps the words out. Everything the microphone hears is
+    written down, addressed to Vesper or not, and one week of var/vesper.log
+    holds 975 transcriptions of which 238 were addressed to him. The rest is a
+    record of a room: other people, a television, half of a phone call.
+    `sensors/window.py` already redacts sensitive window titles, and there was
+    no equivalent for what was said out loud.
+
+    On by default, because it is the only thing that answers "I said the wake
+    word and nothing happened", which is a real question with no other source.
+    Off is for a shared room.
     """
     if not log.enabled:
         return ui
@@ -138,7 +149,12 @@ def attach(ui, log: LogFile):
     if heard is not None:
 
         def tee_heard(text, addressed, _original=heard):
-            log.write("heard", f"{'->' if addressed else '  '} {text}")
+            if transcripts:
+                log.write("heard", f"{'->' if addressed else '  '} {text}")
+            else:
+                # That something was heard, and whether it was for him, without
+                # what it was. Enough to answer "the wake word did nothing".
+                log.write("heard", f"{'->' if addressed else '  '} [{len(text)} chars]")
             return _original(text, addressed)
 
         ui.heard = tee_heard

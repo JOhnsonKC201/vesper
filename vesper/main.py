@@ -168,7 +168,7 @@ def build(cfg: config_module.Config, *, with_mic: bool = True):
     # Tee diagnostics to a file before anything else can fail, because
     # started from your login there is no console to print them to.
     log = LogFile(cfg.log_path())
-    attach(ui, log)
+    attach(ui, log, transcripts=cfg.runtime.log_transcripts)
 
     # Built before the brain, because what he has learned goes into the
     # system prompt and the prompt is fixed for the life of the process.

@@ -361,3 +361,70 @@ def test_context_block_stays_small():
     """It rides on every single turn, so size is a cost, not a detail."""
     block = sensors.context_block()
     assert len(block) < 400, f"context block is {len(block)} chars, too fat for every turn"
+
+
+# --- what gets written down -------------------------------------------------
+
+
+def test_the_log_can_be_told_not_to_keep_the_words(tmp_path):
+    """Everything the microphone hears is transcribed, addressed or not.
+
+    One week of a real var/vesper.log holds 975 transcriptions and 238 of them
+    were for Vesper. The rest is a record of a room: other people, a
+    television, half of a phone call. sensors/window.py already redacts a
+    sensitive window title and there was no equivalent for what was said.
+    """
+    from vesper.logfile import LogFile, attach
+
+    class UI:
+        def __init__(self):
+            self.seen = []
+
+        def heard(self, text, addressed):
+            self.seen.append((text, addressed))
+
+        def info(self, message): pass
+        def warn(self, message): pass
+        def error(self, message): pass
+        def discarded(self, reason): pass
+
+    path = tmp_path / "quiet.log"
+    ui = UI()
+    attach(ui, LogFile(path), transcripts=False)
+    ui.heard("my card number is four one one one", False)
+    ui.heard("Vesper what time is it", True)
+
+    written = path.read_text(encoding="utf-8")
+    assert "card number" not in written
+    assert "four one one one" not in written
+    assert "what time is it" not in written
+    # But that something was heard, and who for, is still answerable.
+    assert "->" in written and written.count("chars") == 2
+    # And the terminal is untouched, which is the point of wrapping rather
+    # than editing the UI.
+    assert ui.seen == [
+        ("my card number is four one one one", False),
+        ("Vesper what time is it", True),
+    ]
+
+
+def test_transcripts_are_kept_by_default(tmp_path):
+    """It is the only thing that answers "I said the wake word and nothing
+    happened", so the default must not change."""
+    from vesper.config import RuntimeSettings
+    from vesper.logfile import LogFile, attach
+
+    assert RuntimeSettings().log_transcripts is True
+
+    class UI:
+        def heard(self, text, addressed): pass
+        def info(self, message): pass
+        def warn(self, message): pass
+        def error(self, message): pass
+        def discarded(self, reason): pass
+
+    path = tmp_path / "loud.log"
+    ui = UI()
+    attach(ui, LogFile(path))
+    ui.heard("Vesper what time is it", True)
+    assert "what time is it" in path.read_text(encoding="utf-8")

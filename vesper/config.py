@@ -248,6 +248,13 @@ class RuntimeSettings:
     # Instructions you have given him that should outlive the session. Blank
     # disables learning entirely and he forgets at every restart, as before.
     lessons: str = "var/lessons.json"
+    # Whether the words themselves go into the log, or only the fact that
+    # something was heard. Everything the microphone picks up is transcribed,
+    # addressed to Vesper or not: one week of a real log holds 975 of them, and
+    # 238 were for him. The rest is a record of a room. On by default, because
+    # it is the only thing that answers "I said the wake word and nothing
+    # happened". Turn it off in a shared space.
+    log_transcripts: bool = True
 
 
 @dataclass

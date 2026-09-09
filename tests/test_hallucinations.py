@@ -107,3 +107,47 @@ def test_a_long_answer_that_reuses_words_is_not_a_loop():
         "open the terminal and then open the log file and tell me what the "
         "last error in it says"
     )
+
+
+# --- the end of a video -----------------------------------------------------
+
+
+def test_the_video_outro_family_is_rejected_at_any_length():
+    """Straight out of var/vesper.log, and it was accepted as speech.
+
+        HEARD Until next time, I'll talk to you again soon with Naoli Online.
+
+    Trained on a great deal of video, Whisper answers noise with the end of
+    one. Those are whole sentences, so they sail past the `duration_s < 2.0`
+    rule that catches "thank you." and "thanks for watching!".
+    """
+    stt = Listener()
+    for invented in (
+        "Until next time, I'll talk to you again soon with Naoli Online.",
+        "Thanks for watching, and I'll see you in the next video.",
+        "Thank you all so much for watching!",
+        "Don't forget to like and subscribe.",
+        "Please subscribe to my channel.",
+        "Subtitles by the community",
+        "See you next time.",
+    ):
+        result = Transcript(text=invented, duration_s=6.0, avg_logprob=-0.2)
+        assert stt._post_gate(result) == "hallucination", f"let through: {invented!r}"
+
+
+def test_real_speech_that_shares_words_with_an_outro_still_gets_through():
+    """The cost of being wrong here is Vesper ignoring you, so it must be
+    narrow. None of these is a sign-off and every one is a plausible thing to
+    say to a desktop assistant."""
+    stt = Listener()
+    for genuine in (
+        "Thanks, that is exactly what I needed.",
+        "Subscribe me to the newsletter on that page.",
+        "What am I watching on Tuesday?",
+        "Thank you for checking, and can you also look at the log?",
+        "See you later, I am off to lunch.",
+        "Next time remind me to run the tests first.",
+        "Can you like the top comment for me?",
+    ):
+        result = Transcript(text=genuine, duration_s=3.0, avg_logprob=-0.2)
+        assert stt._post_gate(result) == "", f"wrongly dropped: {genuine!r}"

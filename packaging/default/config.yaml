@@ -277,6 +277,21 @@ runtime:
   # "forget that" to drop the last one, "forget everything" to clear it.
   # Blank disables it and he forgets at every restart, as he used to.
   lessons: var/lessons.json
+  # Whether the log keeps the words, or only the fact that something was heard.
+  #
+  # Everything the microphone picks up is transcribed, addressed to him or not.
+  # One week of a real log holds 975 transcriptions and 238 of them were for
+  # Vesper. The other 737 are a record of the room, in plain text, in
+  # var/vesper.log. Sensitive window titles are already redacted in the ambient
+  # context; this is the same question asked about speech.
+  #
+  # True is the default because this log is the only thing that answers "I said
+  # the wake word and nothing happened": without it there is no way to tell a
+  # microphone that heard nothing from a transcription that came out wrong from
+  # a wake gate that said no. False still records that something was heard and
+  # whether it was addressed to him, so that question stays answerable, without
+  # keeping what was said. Set it false in a shared room.
+  log_transcripts: true
 
 ui:
   greet_on_start: true
