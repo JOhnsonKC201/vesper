@@ -83,6 +83,11 @@ more.
 
 ## Latency, and where it actually goes
 
+> The table below is from the `base.en` on CPU era, and has not been measured
+> again since the default became `small.en` and transcription moved to the gpu.
+> The README carries the current numbers. It is still here because the argument
+> underneath it did not change, only the figures.
+
 From the moment you stop speaking:
 
 | Stage | Measured |

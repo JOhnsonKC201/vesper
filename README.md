@@ -143,6 +143,35 @@ a machine that has had wheels blocked by Application Control. `tests/fixtures/sp
 and `speaker_b_*.wav` are two genuinely different voices, so a regression here
 fails a test rather than quietly accepting everyone.
 
+## How long before it can hear you
+
+Not the same question as how fast it answers, and for a while the answer was
+worse. `start()` built five things in a row and opened the microphone last, so
+Vesper was deaf for the whole of starting up, which is also the moment you are
+most likely to say something, having just started it.
+
+The microphone opens first now, on its own, and Whisper and the voiceprint warm
+on threads behind it. Measured with the real config, real microphone, real
+models and a real `claude` child, on a warm cache:
+
+| | |
+|---|---|
+| `start()` blocked for, before | 2.54s |
+| `start()` blocked for, after | 0.73s |
+
+Warm numbers, and the cold ones are worse: the pieces measured one at a time
+come to 4.5s, and the log has a cold start where Whisper alone took 7.37s
+against the 1.2s it takes once the model file is in the page cache.
+
+`Listener.load()` takes a lock and re-checks inside it, which is what makes
+warming in the background safe. Without that, the warming thread and the first
+utterance can both find the model unset and both build one, and two copies of
+`small.en` is how a card with room for one runs out of memory a second after
+starting up.
+
+A model that will not build no longer stops Vesper starting. It used to raise
+straight out of `start()`.
+
 ## What it costs while idle
 
 Measured by `scripts/idle_cost.py`, which launches the real thing and samples
@@ -261,6 +290,21 @@ From the moment you stop speaking to the first sound back. Measured by
 | Claude, until something is audible | 2,050ms |
 | Piper synthesis | starts immediately, 31x realtime |
 | **End of speech to first word** | **2.9s on the gpu, 4.3s on the cpu** |
+
+Transcription later got about 7% cheaper again, by not asking the decoder for
+word timings. `word_timestamps=True` makes faster-whisper run a second
+alignment pass over every segment, and the only thing it ever produced here was
+a list of low-confidence words that nothing read. Same model, same clips, same
+decode settings, seven passes over the four wav fixtures, one flag changed:
+
+| | with word timings | without |
+|---|---|---|
+| gpu, float16 | 344.0ms | 319.8ms |
+| cpu, int8 | 1,529.0ms | 1,414.7ms |
+
+Small, and paid on everything the microphone hears rather than only on what was
+said to Vesper. One week of a real log holds 975 transcriptions, and 238 of
+them were addressed to him.
 
 The third row is the interesting one. Claude's first *text* on those questions
 arrives at 4.4s, because it runs the command before saying anything. So when it
