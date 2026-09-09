@@ -40,7 +40,7 @@ class Dashboard:
     """A live status window, opened and closed from the tray."""
 
     def __init__(self, snapshot, *, on_toggle=None, on_open_log=None,
-                 on_quit=None, voices=None, name: str = "Vasper",
+                 on_quit=None, on_error=None, voices=None, name: str = "Vasper",
                  transcript=None) -> None:
         # A callable returning a plain dict. Deliberately not the Conversation
         # itself: this thread must never touch the audio loop's state directly.
@@ -48,6 +48,10 @@ class Dashboard:
         self._on_toggle = on_toggle or (lambda paused: None)
         self._on_open_log = on_open_log or (lambda: None)
         self._on_quit = on_quit or (lambda: None)
+        # Somewhere for a failed redraw to go. Without it the refresh tick
+        # swallows the exception, the window freezes on its last good frame,
+        # and nothing anywhere says why.
+        self._on_error = on_error or (lambda message: None)
         # Optional. None means there is nothing to pick between at all, and
         # then the picker is left out rather than shown as a dead control.
         # Kept as an opaque object so this file knows nothing about ElevenLabs,
@@ -67,6 +71,10 @@ class Dashboard:
         self._root = None
         self._fields: dict[str, object] = {}
         self._ticks = 0
+        # Counted rather than reported every tick. A redraw that fails once
+        # fails four times a second forever, and a log filling at that rate is
+        # its own outage.
+        self._apply_failures = 0
         self._closing = threading.Event()
         # Set from other threads, acted on by the Tk thread. Never a Tk
         # call from outside, which is the rule this whole design exists
@@ -161,6 +169,9 @@ class Dashboard:
             root.configure(bg=NIGHT)
             root.resizable(False, False)
             root.protocol("WM_DELETE_WINDOW", self._destroy)
+            # Escape is what people press to dismiss a status panel, and this
+            # one is opened from a tray icon to be glanced at and closed again.
+            root.bind("<Escape>", lambda _event: self._destroy())
             try:
                 root.iconbitmap(default=self._icon_path())
             except Exception:
@@ -169,8 +180,12 @@ class Dashboard:
             self._build(tk, root)
             self._refresh()
             root.mainloop()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Still swallowed, because a window that will not open must not
+            # take the assistant down with it. But it is said out loud now:
+            # this used to mean clicking the tray icon did nothing at all,
+            # forever, with no way to find out what had gone wrong.
+            self._on_error(f"the dashboard could not open: {exc}")
         finally:
             # On this thread, after mainloop has returned. Tk objects have to
             # be torn down by the thread that made them, and every reference to
@@ -407,12 +422,36 @@ class Dashboard:
             self._fields[key] = value
 
     def _button(self, tk, parent, text: str, command, danger: bool = False):
-        return tk.Button(
+        """A flat button with the three states a person expects to find.
+
+        Tk gives you `activebackground`, which is only the moment the mouse is
+        held down, and nothing at all for hover. On a dark panel that leaves a
+        flat button looking exactly like a label until you happen to click it.
+        The Enter and Leave pair is the hover.
+
+        The highlight ring is keyboard focus, which `highlightthickness=0` had
+        switched off along with the default border it was put there to hide, so
+        Tab moved through the buttons with nothing on screen saying where it
+        had got to. Quit fills with its warning colour on hover rather than
+        going the same grey as the other two, because it is the one that ends
+        the session and it should not be the one you click by accident.
+        """
+        rest = WARN if danger else TEXT
+        hover_bg = WARN if danger else LINE
+        hover_fg = NIGHT if danger else TEXT
+        button = tk.Button(
             parent, text=text, command=command, font=("Segoe UI", 9),
-            bg=PANEL, fg=WARN if danger else TEXT, activebackground=LINE,
-            activeforeground=TEXT, relief="flat", bd=0, padx=14, pady=6,
-            cursor="hand2", highlightthickness=0,
+            bg=PANEL, fg=rest, activebackground=hover_bg,
+            activeforeground=hover_fg, relief="flat", bd=0, padx=14, pady=6,
+            cursor="hand2", highlightthickness=1, highlightbackground=NIGHT,
+            highlightcolor=COOL, takefocus=True,
         )
+        button.bind("<Enter>", lambda _e: button.configure(bg=hover_bg, fg=hover_fg))
+        button.bind("<Leave>", lambda _e: button.configure(bg=PANEL, fg=rest))
+        # Tk wires Space on a focused button and leaves Return alone, and
+        # Return is the one people actually press.
+        button.bind("<Return>", lambda _e: command())
+        return button
 
     # --- live updates -------------------------------------------------------
 
@@ -436,10 +475,18 @@ class Dashboard:
         if self._ticks % 4 == 1:
             try:
                 self._apply(self.snapshot() or {})
-            except Exception:
+            except Exception as exc:
                 # A dashboard that took down the assistant it reports on would
-                # be a poor trade. Skip this tick and try again.
-                pass
+                # be a poor trade, so the tick is skipped and the next one is
+                # tried. Skipping silently forever is how a window freezes on
+                # its last good frame with nothing in the log to explain it,
+                # so the first failure is reported and then one a minute after
+                # that, which is enough to see it without drowning the log.
+                self._apply_failures += 1
+                if self._apply_failures == 1 or self._apply_failures % 60 == 0:
+                    self._on_error(
+                        f"dashboard could not redraw ({self._apply_failures}x): {exc}"
+                    )
         try:
             root.after(250, self._refresh)
         except Exception:
