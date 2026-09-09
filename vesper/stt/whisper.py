@@ -15,6 +15,7 @@ answers phantom sentences is worse than one that mishears.
 
 from __future__ import annotations
 
+import gc
 import re
 import time
 from dataclasses import dataclass, field
@@ -162,6 +163,11 @@ class Listener:
         self.resolved_model = ""
         self.resolved_device = ""
         self.resolved_compute = ""
+        # Set to "cpu" once the gpu has failed, and never unset. Without it a
+        # card that dies mid session is retried on every single utterance,
+        # because `load()` reads the config afresh each time and the config
+        # still says `auto`.
+        self._forced_device: str | None = None
         # Surfaced by --check and the dashboard: a silent assistant with a
         # rising failure count is a very different bug from a deaf one.
         self.failures = 0
@@ -172,7 +178,7 @@ class Listener:
         if self._model is not None:
             return
 
-        device = self.config.device
+        device = self._forced_device or self.config.device
         if device == "auto":
             device = "cuda" if accel.device_count() else "cpu"
         if device == "cuda":
@@ -209,10 +215,20 @@ class Listener:
         hint = accel.missing_runtime_hint()
         if hint:
             self._log(f"whisper: {hint}")
+        # Let go of the broken cuda model before asking for a second one. It is
+        # holding host memory as well as card memory, and the machine may
+        # already be out of both, which is how a fallback ends up failing too.
+        self._release()
+        self._forced_device = "cpu"
         # Always the cpu's own best type, never the configured one. Whatever
         # `compute` was, it was chosen for the device that just failed, and
         # float16 on a processor does not load.
         self._build("cpu", accel.best_compute_type("cpu"))
+
+    def _release(self) -> None:
+        """Drop the loaded model and its memory before building another one."""
+        self._model = None
+        gc.collect()
 
     def _build(self, device: str, compute: str) -> None:
         """Construct the model on one device and record what actually happened."""
@@ -237,15 +253,28 @@ class Listener:
         """Move to the CPU after the GPU failed mid session. True if it moved.
 
         A driver reset or a card taken by something else should cost one
-        utterance, not the rest of the day. Only ever called when the current
-        device is cuda, so it cannot loop.
+        utterance, not the rest of the day. That promise is kept by
+        `_forced_device` rather than by `resolved_device`: a build that raises
+        never reaches the line that records the device it was building for, so
+        after a failed rebuild `resolved_device` still says "cuda" and the old
+        guard sent us around the same failing loop on every later utterance.
+
+        Releasing the dead model first matters as much as the flag. This is
+        called after the card refused to work, which on a real machine has
+        meant out of memory, and asking for a second model while the first is
+        still held is how the cpu rebuild ran out of memory too.
         """
-        if self.resolved_device != "cuda":
-            return False
+        if self._forced_device == "cpu":
+            return False  # already on the cpu; there is nowhere left to go
         self._log(f"whisper gpu failed ({reason}), moving to cpu for this session")
+        self._forced_device = "cpu"
+        self._release()
         try:
             self._build("cpu", accel.best_compute_type("cpu"))
-        except Exception as exc:  # nothing left to fall back to
+        except Exception as exc:
+            # Not fatal and not permanent. `_forced_device` keeps the card out
+            # of it from here on, and the model is unset, so the next utterance
+            # retries the cpu on its own. Transient pressure recovers by itself.
             self._log(f"whisper cpu reload failed: {type(exc).__name__}: {exc}")
             return False
         return True

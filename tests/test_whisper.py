@@ -224,7 +224,7 @@ def test_one_failed_transcription_does_not_end_the_assistant(monkeypatch):
             raise RuntimeError("the gpu fell over")
 
     stt._model = Exploding()
-    stt.resolved_device = "cpu"  # nothing left to fall back to
+    stt._forced_device = "cpu"  # nothing left to fall back to
     result = stt.transcribe(load_wav("speech_short.wav"))
     assert result.ok is False
     assert result.rejected_reason == "transcription-failed"
@@ -249,6 +249,84 @@ def test_a_gpu_that_fails_mid_session_moves_to_the_cpu_and_keeps_going():
     result = stt.transcribe(load_wav("speech_short.wav"))
     assert stt.resolved_device == "cpu"
     assert result.ok, "the retry on the cpu should have produced a real transcript"
+
+
+def test_the_dead_gpu_model_is_let_go_of_before_the_cpu_one_is_asked_for():
+    """From a real session log, 2026-09-05.
+
+        whisper gpu failed (CUDA failed with error out of memory), moving to cpu
+        whisper cpu reload failed: RuntimeError: mkl_malloc: failed to allocate
+        transcription failed: CUDA failed with error out of memory
+
+    The card ran out of memory, and then so did the fallback, because the model
+    that had just died was still held while the replacement was allocated.
+    """
+    stt = Listener(WhisperConfig(model="tiny.en", device="cpu"), log=lambda m: None)
+
+    class Dying:
+        def transcribe(self, *a, **k):
+            raise RuntimeError("CUDA failed with error out of memory")
+
+    stt._model = Dying()
+    held_during_build = []
+    stt._build = lambda device, compute: (
+        held_during_build.append(stt._model),
+        setattr(stt, "_model", object()),
+        setattr(stt, "resolved_device", device),
+    )
+
+    stt._fall_back_to_cpu("out of memory")
+    assert held_during_build == [None], (
+        "the cpu model was allocated while the dead gpu model was still held"
+    )
+
+
+def test_a_card_that_dies_is_not_asked_again_on_every_later_utterance():
+    """The docstring promised one utterance, and the code charged for all of them.
+
+    A failed `_build` raises before the line that records the device, so
+    `resolved_device` was still "cuda" afterwards and the old guard let the
+    whole failing cycle run again for every single thing you said.
+    """
+    stt = Listener(WhisperConfig(model="tiny.en", device="cuda"), log=lambda m: None)
+    stt._model = object()
+    stt.resolved_device = "cuda"
+
+    attempts = []
+
+    def refuse(device, compute):
+        attempts.append(device)
+        raise RuntimeError("no memory left")
+
+    stt._build = refuse
+
+    assert stt._fall_back_to_cpu("device lost") is False
+    assert stt._fall_back_to_cpu("device lost") is False
+    assert stt._fall_back_to_cpu("device lost") is False
+    assert attempts == ["cpu"], f"tried to rebuild {len(attempts)} times, not once"
+
+
+def test_a_transient_shortage_recovers_on_the_next_utterance():
+    """Out of memory is usually a moment, not a verdict.
+
+    A failed cpu rebuild leaves no model, so the next utterance builds one. It
+    must go to the cpu and never back to the card.
+    """
+    stt = Listener(WhisperConfig(model="tiny.en", device="cuda"), log=lambda m: None)
+    stt._model = object()
+    stt.resolved_device = "cuda"
+    stt._build = lambda device, compute: (_ for _ in ()).throw(RuntimeError("busy"))
+
+    assert stt._fall_back_to_cpu("out of memory") is False
+    assert stt._model is None, "a failed rebuild must not leave the dead model in place"
+
+    asked = []
+    stt._build = lambda device, compute: (
+        asked.append(device),
+        setattr(stt, "_model", object()),
+    )
+    stt.load()
+    assert asked == ["cpu"], "the card must stay out of it for the rest of the session"
 
 
 def test_the_cuda_dll_search_is_idempotent():
