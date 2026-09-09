@@ -15,6 +15,7 @@ utterance boundaries.
 
 from __future__ import annotations
 
+import collections
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -151,6 +152,20 @@ class Endpointer:
         self._collected_ms = 0.0
         self._candidate: list[np.ndarray] = []
 
+        # The lead-in is kept here rather than read from the microphone's ring.
+        # That ring is appended on every captured block, so by the time an
+        # utterance was confirmed its tail was the same audio as the candidate
+        # blocks and both were concatenated: every utterance opened with its
+        # first 120ms twice over, which is also what every enrolment clip was
+        # built from. These are the blocks this endpointer has already seen and
+        # ruled out, so they cannot overlap the candidate by construction, and
+        # there is no consumer lag to reason about.
+        self._lead: collections.deque = collections.deque()
+        self._lead_samples = 0
+        self._lead_target = max(
+            0, int(self.config.preroll_ms * self.sample_rate / 1000)
+        )
+
     @property
     def collecting(self) -> bool:
         return self._collecting
@@ -159,17 +174,28 @@ class Endpointer:
         self._collecting = False
         self._chunks.clear()
         self._candidate.clear()
+        self._lead.clear()
+        self._lead_samples = 0
         self._speech_ms = self._silence_ms = self._collected_ms = 0.0
         self.vad.reset()
 
-    def feed(self, block: np.ndarray, preroll=None) -> np.ndarray | None:
+    def _remember(self, block: np.ndarray) -> None:
+        """Hold this block as lead-in, dropping whatever is older than needed.
+
+        Keeps the fewest whole blocks that still cover `preroll_ms`, so the
+        first syllable survives without carrying a second of silence around.
+        """
+        self._lead.append(block)
+        self._lead_samples += block.size
+        while self._lead and self._lead_samples - self._lead[0].size >= self._lead_target:
+            self._lead_samples -= self._lead.popleft().size
+
+    def feed(self, block: np.ndarray) -> np.ndarray | None:
         """Add one block. Returns a complete utterance, or None.
 
-        `preroll` may be an array or a callable returning one. Prefer the
-        callable: this runs 33 times a second forever, and the pre-roll is used
-        only at the instant an utterance opens. Passing the array meant building
-        and discarding roughly 830 KB every second of silence, which is most of
-        the day.
+        The lead-in that opens an utterance comes from this endpointer's own
+        history of blocks it has already ruled out, so what comes back is always
+        a verbatim run of what was fed in, in order, with nothing repeated.
         """
         block = np.asarray(block, dtype=np.float32).reshape(-1)
         if block.size == 0:
@@ -183,23 +209,28 @@ class Endpointer:
                 self._speech_ms += block_ms
                 self._candidate.append(block)
                 if self._speech_ms >= self.config.start_speech_ms:
-                    # Confirmed. Open the utterance with the pre-roll so the
-                    # first syllable is not clipped.
+                    # Confirmed. Open with the lead-in so the first syllable is
+                    # not clipped. These blocks came before the candidate and
+                    # are not in it, so the utterance stays one unbroken run.
                     self._collecting = True
-                    self._chunks = []
-                    lead = preroll() if callable(preroll) else preroll
-                    if lead is not None and lead.size:
-                        self._chunks.append(np.asarray(lead, dtype=np.float32))
+                    self._chunks = list(self._lead)
                     self._chunks.extend(self._candidate)
+                    self._lead.clear()
+                    self._lead_samples = 0
                     self._collected_ms = sum(
                         1000.0 * c.size / self.sample_rate for c in self._chunks
                     )
                     self._candidate = []
                     self._silence_ms = 0.0
             else:
-                # A lone noisy block is not the start of speech.
+                # A lone noisy block is not the start of speech. Those blocks
+                # are still audio that came before whatever speech follows, so
+                # they move into the lead-in rather than being thrown away.
                 self._speech_ms = 0.0
+                for stale in self._candidate:
+                    self._remember(stale)
                 self._candidate.clear()
+                self._remember(block)
             return None
 
         self._chunks.append(block)
