@@ -37,6 +37,15 @@ class LogFile:
         self.path = Path(path) if path else None
         self.max_bytes = max_bytes
         self._lock = threading.Lock()
+        # Every line used to cost a mkdir, an exists, a stat, and then the open
+        # and the write. Four of those five answer a question we already know
+        # the answer to. The directory is made once, and the size is carried
+        # forward, so the file is only measured when the running total says it
+        # is worth measuring. The handle is still opened and closed per line:
+        # holding it open would be cheaper again, and on Windows it would also
+        # stop `_rotate_if_needed` renaming the file out from under itself.
+        self._made_parent = False
+        self._written = -1
 
     @property
     def enabled(self) -> bool:
@@ -52,19 +61,32 @@ class LogFile:
         )
         try:
             with self._lock:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
+                if not self._made_parent:
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
+                    self._made_parent = True
                 self._rotate_if_needed()
                 with self.path.open("a", encoding="utf-8") as handle:
                     handle.write(line)
+                self._written += len(line.encode("utf-8"))
         except (OSError, ValueError):
             # ValueError covers a path the OS will not even parse. Both mean
             # the same thing: no log, and the assistant carries on regardless.
-            pass
+            # The byte count is left alone, so the next write measures the file
+            # rather than trusting a total that may now be wrong.
+            self._made_parent = False
+            self._written = -1
 
     def _rotate_if_needed(self) -> None:
-        if self.path is None or not self.path.exists():
+        if self.path is None:
             return
-        if self.path.stat().st_size < self.max_bytes:
+        if self._written < 0:
+            # First write of this process, or straight after a failure. This is
+            # the one place the file is actually measured.
+            self._written = self.path.stat().st_size if self.path.exists() else 0
+        if self._written < self.max_bytes:
+            return
+        if not self.path.exists():
+            self._written = 0
             return
         # vesper.log -> vesper.log.1 -> vesper.log.2, oldest dropped.
         for index in range(KEEP_ROTATIONS - 1, 0, -1):
@@ -73,6 +95,7 @@ class LogFile:
             if older.exists():
                 older.replace(newer)
         self.path.replace(self.path.with_suffix(self.path.suffix + ".1"))
+        self._written = 0
 
     # --- convenience --------------------------------------------------------
 

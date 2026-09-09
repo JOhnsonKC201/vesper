@@ -76,6 +76,11 @@ _WORDS = re.compile(r"[a-z']+")
 # says the same complaint after each thing you say is unbearable.
 AUTH_NAG_S = 300.0
 
+# How often to mention that the microphone dropped audio. Overflows arrive in
+# bursts, so this is one summary on a timer rather than a line per occurrence,
+# and the counting happens in the audio callback where nothing else may.
+OVERFLOW_REPORT_S = 60.0
+
 # Handled locally, never sent to Claude. Telling something to be quiet should
 # not require a network round trip, and must work while it is mid-sentence.
 _MUTE_PHRASES = (
@@ -233,6 +238,7 @@ class Conversation:
         self._transcript: collections.deque[tuple[str, str]] = collections.deque(maxlen=40)
         self._speaking_since = 0.0
         self._barge_run = 0
+        self._overflows_said_at = 0.0
         self.turns = 0
         self.interruptions = 0
         self.echo_rejections = 0
@@ -450,6 +456,7 @@ class Conversation:
         try:
             while self._running.is_set():
                 block = self.mic.read(timeout=0.5)
+                self._report_overflows()
                 if block is None:
                     continue
                 try:
@@ -476,6 +483,24 @@ class Conversation:
             pass
         finally:
             self.stop()
+
+    def _report_overflows(self) -> None:
+        """Say, at most once a minute, that the microphone dropped audio.
+
+        Counted in the PortAudio callback and reported from here, because
+        writing to the log inside that callback is what caused the overflows to
+        arrive in bursts in the first place: the report made the callback slow,
+        and a slow callback is the definition of an overflow.
+        """
+        now = time.monotonic()
+        if now - self._overflows_said_at < OVERFLOW_REPORT_S:
+            return
+        dropped = self.mic.take_overflows()
+        self._overflows_said_at = now
+        if dropped:
+            self.ui.warn(
+                f"the microphone dropped audio {dropped} times in the last minute"
+            )
 
     def _handle_block(self, block: np.ndarray) -> None:
         # Before the pause check, because a window left open when you paused

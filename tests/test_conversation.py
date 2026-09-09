@@ -426,3 +426,44 @@ def test_one_bad_audio_block_does_not_end_the_assistant():
     assert conv.errors == 1
     assert any("handling audio failed" in message for message in ui.errors)
     assert conv.status()["errors"] == 1
+
+
+# --- dropped audio ----------------------------------------------------------
+
+
+def test_dropped_audio_is_reported_once_rather_than_per_block():
+    """The count is kept by the microphone and the sentence is said here.
+
+    Nine overflows inside a second is one problem, not nine, and the reporting
+    is what used to cause the next one.
+    """
+    conv, _brain, _stt, _voice, _speaker, ui = build()
+    conv.mic.overflows = 9
+
+    conv._report_overflows()  # arms the timer, says nothing yet
+    conv._overflows_said_at = 0.0
+    conv._report_overflows()
+
+    said = [line for line in ui.warnings if "dropped audio" in line]
+    assert len(said) == 1, f"expected one summary, got {ui.warnings}"
+    assert "9 times" in said[0]
+
+
+def test_a_quiet_microphone_says_nothing_at_all():
+    conv, _brain, _stt, _voice, _speaker, ui = build()
+    conv._overflows_said_at = 0.0
+    conv._report_overflows()
+    assert not [line for line in ui.warnings if "dropped audio" in line]
+
+
+def test_overflows_are_not_reported_more_than_once_a_minute():
+    conv, _brain, _stt, _voice, _speaker, ui = build()
+    conv._overflows_said_at = 0.0
+    conv.mic.overflows = 3
+    conv._report_overflows()
+    conv.mic.overflows = 4
+    conv._report_overflows()
+
+    said = [line for line in ui.warnings if "dropped audio" in line]
+    assert len(said) == 1
+    assert conv.mic.overflows == 4, "the second burst is still being counted up"

@@ -74,6 +74,34 @@ def test_the_log_rotates_rather_than_filling_the_disk(tmp_path):
     assert (tmp_path / "vesper.log.1").exists(), "never rotated"
 
 
+def test_a_log_that_is_already_full_when_we_open_it_still_rotates(tmp_path):
+    """The size is carried forward now rather than measured on every line.
+
+    The one case that has to keep working is the first write of a process that
+    inherited a file already over the limit, because that is what a restart is.
+    """
+    path = tmp_path / "vesper.log"
+    path.write_text("x" * 5_000, encoding="utf-8")
+
+    log = LogFile(path, max_bytes=2_000)
+    log.info("first line after a restart")
+
+    assert (tmp_path / "vesper.log.1").exists(), "the inherited file was never measured"
+    assert "first line after a restart" in path.read_text(encoding="utf-8")
+
+
+def test_a_write_that_failed_does_not_leave_a_stale_size_behind(tmp_path):
+    """After a failure the running total can no longer be trusted."""
+    path = tmp_path / "vesper.log"
+    log = LogFile(path, max_bytes=2_000)
+    log.info("one good line")
+    assert log._written > 0
+
+    log.path = tmp_path / "gone" / "\0bad"
+    log.info("this one cannot be written")
+    assert log._written == -1, "the next write must measure rather than assume"
+
+
 def test_a_disabled_log_is_silent_not_broken(tmp_path):
     log = LogFile(None)
     assert not log.enabled
