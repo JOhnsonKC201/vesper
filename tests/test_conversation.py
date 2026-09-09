@@ -588,3 +588,77 @@ def test_the_transcript_can_be_read_while_it_is_being_written():
     speaker.close()
 
     assert not raced, f"transcript() raced the writer: {raced}"
+
+
+# --- starting up ------------------------------------------------------------
+
+
+def test_the_microphone_opens_before_any_model_is_built():
+    """Vesper used to be deaf for the whole of startup.
+
+    Measured one piece at a time on this machine: 4.5s of model building warm,
+    and the log has a cold start where whisper alone took 7.4s. Startup is also
+    when you are most likely to say something, having just started it.
+    """
+    order = []
+
+    conv, _brain, stt, _voice, speaker, _ui = build()
+    conv.mic.start = lambda: order.append("mic")
+    stt.load = lambda: order.append("whisper")
+    conv.brain.auth_status = lambda: order.append("brain") or True
+
+    conv.start()
+    for thread in conv._warming:
+        thread.join(timeout=10)
+    conv._running.clear()
+    settle(speaker)
+    speaker.close()
+
+    assert order[0] == "mic", f"the microphone opened at position {order.index('mic')}"
+    assert "whisper" in order, "the model was never warmed"
+
+
+def test_a_model_that_will_not_warm_does_not_stop_him_starting():
+    """The person who asks for it should be told, not the log at startup."""
+    conv, _brain, stt, _voice, speaker, ui = build()
+
+    def refuse():
+        raise RuntimeError("out of memory")
+
+    stt.load = refuse
+    conv.start()
+    for thread in conv._warming:
+        thread.join(timeout=10)
+    conv._running.clear()
+    settle(speaker)
+    speaker.close()
+
+    assert conv.mic.started, "the microphone should be open regardless"
+    assert any("did not warm up" in w for w in ui.warnings), ui.warnings
+
+
+def test_the_first_utterance_never_builds_a_second_model():
+    """Two copies of small.en is how a card with room for one runs out.
+
+    The warming thread and the first utterance can both find the model unset,
+    so `load` takes a lock and checks again inside it.
+    """
+    from vesper.stt.whisper import Listener, WhisperConfig
+
+    stt = Listener(WhisperConfig(model="tiny.en", device="cpu"), log=lambda m: None)
+    builds = []
+    real = stt._load_unlocked
+
+    def counted():
+        builds.append(1)
+        time.sleep(0.05)  # widen the window the lock has to cover
+        real()
+
+    stt._load_unlocked = counted
+    threads = [threading.Thread(target=stt.load) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert len(builds) == 1, f"{len(builds)} models were built at once"

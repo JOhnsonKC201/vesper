@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import gc
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -166,6 +167,7 @@ class Listener:
         # because `load()` reads the config afresh each time and the config
         # still says `auto`.
         self._forced_device: str | None = None
+        self._load_lock = threading.Lock()
         # Surfaced by --check and the dashboard: a silent assistant with a
         # rising failure count is a very different bug from a deaf one.
         self.failures = 0
@@ -173,9 +175,22 @@ class Listener:
     # --- model --------------------------------------------------------------
 
     def load(self) -> None:
+        """Build the model if it is not built. Safe to call from any thread.
+
+        The lock is what lets this be warmed in the background while the
+        microphone is already open. Without it the warming thread and the first
+        utterance can both find `_model` unset and both build one, and two
+        copies of small.en is how a card with room for one runs out of memory a
+        second after starting up.
+        """
         if self._model is not None:
             return
+        with self._load_lock:
+            if self._model is not None:  # somebody built it while we waited
+                return
+            self._load_unlocked()
 
+    def _load_unlocked(self) -> None:
         device = self._forced_device or self.config.device
         if device == "auto":
             device = "cuda" if accel.device_count() else "cpu"

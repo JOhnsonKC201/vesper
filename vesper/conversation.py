@@ -239,6 +239,9 @@ class Conversation:
         self._speaking_since = 0.0
         self._barge_run = 0
         self._overflows_said_at = 0.0
+        # Model loads started by `start()` and never joined. Kept so `stop()`
+        # can tell whether one is still running.
+        self._warming: list[threading.Thread] = []
         # Both deques above are written by whichever thread is speaking, and
         # the proactive loop speaks from its own. They are read by two others:
         # the audio loop in `_is_own_voice`, and the dashboard in
@@ -335,17 +338,58 @@ class Conversation:
     # --- lifecycle ----------------------------------------------------------
 
     def start(self) -> None:
-        sensors.take()  # prime psutil counters
-        self.stt.load()
-        if self.voiceprint is not None and self.voiceprint.enrolled:
-            voiceprint.warm()
-        self.start_brain()
-        # The microphone runs either way: a Vesper that cannot hear can never
-        # notice that the login has come back.
+        # The microphone first, and before anything slow. Everything below it
+        # is a model being built, and Vesper was deaf for all of it: measured
+        # one piece at a time on this machine, 4.5s warm, and the log has a
+        # cold start where whisper alone took 7.4s. Startup is also the moment
+        # you are most likely to say something, having just started it.
+        #
+        # It runs whatever else happens, including a dead login: a Vesper that
+        # cannot hear can never notice the login has come back.
         self.mic.start()
+
+        sensors.take()  # prime psutil counters, 20ms
+
+        # Independent of each other and of the brain, so they warm behind the
+        # microphone rather than in front of it. Nothing waits on them here.
+        # `Listener.load` takes a lock and is idempotent, so the first
+        # utterance either finds the model ready or waits for the same build
+        # rather than starting a second one.
+        self._warming = [
+            self._warm("whisper", self.stt.load),
+            self._warm("voiceprint", self._warm_voiceprint),
+        ]
+
+        # Not backgrounded. It decides `_locked_out`, which decides whether the
+        # greeting below is a lie.
+        self.start_brain()
+
         self._running.set()
         if self.config.greet_on_start and not self._locked_out:
             self.speaker.say(f"{self.config.name} here. I'm listening.")
+
+    def _warm(self, what: str, load) -> threading.Thread:
+        """Build one model on its own thread, reporting rather than raising."""
+
+        def run() -> None:
+            started = time.monotonic()
+            try:
+                load()
+            except Exception as exc:
+                # Not fatal here. Whatever needs this model will try to load it
+                # again and fail in front of the person who asked, which is a
+                # better place to be told than a log line at startup.
+                self.ui.warn(f"{what} did not warm up, {type(exc).__name__}: {exc}")
+                return
+            self.ui.info(f"{what} ready in {time.monotonic() - started:.2f}s")
+
+        thread = threading.Thread(target=run, daemon=True, name=f"warm-{what}")
+        thread.start()
+        return thread
+
+    def _warm_voiceprint(self) -> None:
+        if self.voiceprint is not None and self.voiceprint.enrolled:
+            voiceprint.warm()
 
     def start_brain(self) -> None:
         """Spawn the brain, unless the CLI says it is not logged in.
