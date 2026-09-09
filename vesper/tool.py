@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import os
 import re
 import sys
@@ -50,6 +51,9 @@ from . import hands
 
 ROOT = Path(__file__).resolve().parent.parent
 SHOTS = ROOT / "var" / "shots"
+# The app list, cached between runs because `vasper` is a fresh process
+# every time and rebuilding it costs 0.66s. See `installed_apps`.
+APP_INDEX = ROOT / "var" / "apps.json"
 
 # Start Menu trees, most specific first: something you pinned yourself should
 # win over the same name shipped for every account on the machine.
@@ -189,7 +193,7 @@ def store_apps() -> list[App]:
         return []
 
 
-def installed_apps() -> list[Path | App]:
+def _scan_apps() -> list[Path | App]:
     """Start Menu shortcuts first, then the apps only the AppsFolder knows.
 
     A shortcut wins over an AppsFolder entry of the same name because the
@@ -211,6 +215,88 @@ def installed_apps() -> list[Path | App]:
             seen.add(key)
             out.append(app)
     return sorted(out, key=lambda p: p.stem.lower())
+
+
+def _menus_stamp() -> str:
+    """A cheap fingerprint of the Start Menu trees, for knowing when to rescan.
+
+    The top directory mtimes rather than a walk. Windows touches a directory
+    when an entry is added or removed under it, which is when this index goes
+    wrong, and it is two stat calls rather than a recursive scan. An install
+    that only changes a file deep in the tree without touching these will be
+    missed until something else does; a wrong app name for an hour is a much
+    smaller cost than 0.66s on every open.
+    """
+    parts = []
+    for menu in START_MENUS:
+        try:
+            parts.append(f"{menu}:{menu.stat().st_mtime_ns}")
+        except OSError:
+            parts.append(f"{menu}:none")
+    return "|".join(parts)
+
+
+def installed_apps() -> list[Path | App]:
+    """The app list, read from `var/apps.json` unless the Start Menu changed.
+
+    `match_app` calls this, `cmd_open` calls `match_app`, and `vasper` is a
+    fresh process every time, so nothing could be kept in memory between calls.
+    Measured on this machine: `vasper apps` 0.66s against `vasper windows`
+    0.10s, and the whole difference is this walking two Start Menu trees and
+    enumerating the shell AppsFolder over COM.
+
+    That was paid before every single `vasper open`, with somebody waiting to
+    hear the app start.
+    """
+    stamp = _menus_stamp()
+    cached = _read_app_index(stamp)
+    if cached is not None:
+        return cached
+    apps = _scan_apps()
+    _write_app_index(stamp, apps)
+    return apps
+
+
+def _read_app_index(stamp: str) -> list[Path | App] | None:
+    """The saved list, or None if it is missing, stale, or unreadable."""
+    try:
+        with APP_INDEX.open(encoding="utf-8") as handle:
+            saved = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(saved, dict) or saved.get("stamp") != stamp:
+        return None
+    out: list[Path | App] = []
+    for entry in saved.get("apps", []):
+        try:
+            if entry["kind"] == "link":
+                out.append(Path(entry["path"]))
+            else:
+                out.append(App(entry["name"], entry["target"]))
+        except (KeyError, TypeError):
+            return None  # damaged, or written by an older version
+    return out
+
+
+def _write_app_index(stamp: str, apps: list[Path | App]) -> None:
+    """Save the list. Never raises: a cache that cannot be written is not a
+    reason to fail to open an app."""
+    entries = [
+        {"kind": "app", "name": a.name, "target": a.target}
+        if isinstance(a, App)
+        else {"kind": "link", "path": str(a)}
+        for a in apps
+    ]
+    try:
+        APP_INDEX.parent.mkdir(parents=True, exist_ok=True)
+        # Written beside and renamed, so a reader never sees half a file. Two
+        # of these really can overlap: Claude runs `vasper` from a shell.
+        temporary = APP_INDEX.with_suffix(f".{os.getpid()}.tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump({"stamp": stamp, "apps": entries}, handle)
+        temporary.replace(APP_INDEX)
+    except (OSError, ValueError):
+        pass
 
 
 def _similarity(needle: str, name: str) -> float:

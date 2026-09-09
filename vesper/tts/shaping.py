@@ -31,6 +31,7 @@ and measurably cheaper than the synthesis it follows.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import lru_cache
 
 import numpy as np
 
@@ -177,14 +178,32 @@ def _response(freqs: np.ndarray, character: Character) -> np.ndarray:
     return gain
 
 
+@lru_cache(maxsize=32)
+def _curve(size: int, rate: int, character: Character) -> np.ndarray:
+    """The gain curve for one chunk length, built once and then kept.
+
+    `_response` is a pure function of the frequency bins and the character, and
+    the character does not change for the life of a voice. It was rebuilt for
+    every chunk of every sentence: a log2, an exp, three `10**` arrays and two
+    square roots, costing 40.6us of the 60.6us the whole tone pass takes.
+
+    Piper writes fixed size chunks, so the same few lengths come round over and
+    over and this is a hit almost every time. Small on purpose: a voice uses
+    one or two sizes, and thirty-two curves of a kilobyte is not worth thinking
+    about.
+    """
+    curve = _response(np.fft.rfftfreq(size, 1.0 / rate), character)
+    curve.flags.writeable = False  # shared between calls, so nobody may edit it
+    return curve
+
+
 def _apply_tone(samples: np.ndarray, rate: int, character: Character) -> np.ndarray:
     if not (character.low_cut_hz or character.presence_db or character.air_db):
         return samples
     if samples.size < 32:
         return samples
     spectrum = np.fft.rfft(samples)
-    freqs = np.fft.rfftfreq(samples.size, 1.0 / rate)
-    return np.fft.irfft(spectrum * _response(freqs, character), n=samples.size)
+    return np.fft.irfft(spectrum * _curve(samples.size, rate, character), n=samples.size)
 
 
 # --- space ------------------------------------------------------------------

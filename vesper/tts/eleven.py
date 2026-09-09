@@ -238,6 +238,13 @@ class ElevenTTS:
             self.fallback.close()
         except Exception:
             pass
+        # The http client is kept open between sentences now, so something has
+        # to shut it. Last, and guarded, for the same reason as the fallback:
+        # nothing in shutdown may end up waiting on the network.
+        try:
+            self.client.close()
+        except Exception:
+            pass
 
     # --- decisions ----------------------------------------------------------
 
