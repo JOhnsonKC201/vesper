@@ -475,6 +475,17 @@ class ClaudeBrain:
                     # immediately, with this turn's text and this turn's cost
                     # charged twice. Take the process down instead.
                     self._log("turn timed out, restarting the brain")
+                    # The one-shot grant dies with the turn it was given for.
+                    # Without this the replacement is spawned still carrying
+                    # it, and the clearing happens only later, if `revoke_soon`
+                    # wins a race against the next question. A permission given
+                    # for a turn that was then abandoned must not be sitting on
+                    # a fresh process that is ready and waiting for the next
+                    # thing anybody says. The standing slot, the hands after a
+                    # yes that named the session, survives on purpose.
+                    if self._grants:
+                        self._log("the timed out turn's grant goes with it")
+                        self._grants = ()
                     self._replace_process()
                     yield BrainError("that took too long, so I stopped waiting")
                     return

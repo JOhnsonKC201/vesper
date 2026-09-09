@@ -55,6 +55,16 @@ SHOTS = ROOT / "var" / "shots"
 # The app list, cached between runs because `vasper` is a fresh process
 # every time and rebuilding it costs 0.66s. See `installed_apps`.
 APP_INDEX = ROOT / "var" / "apps.json"
+# A ceiling on how stale the index may get. `_menus_stamp` cannot see a
+# shortcut added to an existing subfolder, or anything at all in the shell
+# AppsFolder, so without this an app installed today could stay missing from
+# the list indefinitely. Six hours costs one 700ms rescan a day.
+MAX_INDEX_AGE_S = 6 * 60 * 60
+
+# How the shell names an app that has no shortcut anywhere. One constant, so
+# `store_apps` writing it and `_read_app_index` checking it cannot drift apart:
+# if they ever did, the check would stop meaning anything.
+_APPSFOLDER = "shell:AppsFolder\\"
 
 # Start Menu trees, most specific first: something you pinned yourself should
 # win over the same name shipped for every account on the machine.
@@ -186,7 +196,7 @@ def store_apps() -> list[App]:
             item = items.Item(index)
             name, path = str(item.Name or "").strip(), str(item.Path or "").strip()
             if name and path:
-                apps.append(App(name, "shell:AppsFolder\\" + path))
+                apps.append(App(name, _APPSFOLDER + path))
         return apps
     except Exception:
         # No shell COM, or a locked down profile. The Start Menu shortcuts
@@ -221,12 +231,20 @@ def _scan_apps() -> list[Path | App]:
 def _menus_stamp() -> str:
     """A cheap fingerprint of the Start Menu trees, for knowing when to rescan.
 
-    The top directory mtimes rather than a walk. Windows touches a directory
-    when an entry is added or removed under it, which is when this index goes
-    wrong, and it is two stat calls rather than a recursive scan. An install
-    that only changes a file deep in the tree without touching these will be
-    missed until something else does; a wrong app name for an hour is a much
-    smaller cost than 0.66s on every open.
+    The top directory mtimes rather than a walk: two stat calls against a
+    recursive scan of both trees plus a COM enumeration.
+
+    It is deliberately not a complete answer, and the gaps are worth naming.
+    An installer that drops a shortcut into an existing nested subfolder
+    touches that subfolder rather than the top level, so the stamp does not
+    move. And `store_apps()` reads the shell AppsFolder, which this cannot see
+    at all, so a newly installed Store app can never invalidate the index on
+    its own. Neither can make `vasper open` launch the wrong thing, since every
+    entry is checked on read; what they do is leave a new app missing from the
+    list, which the fuzzy matcher can then answer with an older similar name.
+
+    That is what `MAX_INDEX_AGE_S` is for. It puts a ceiling on how stale this
+    can get when the mtimes never move, which without it is forever.
     """
     parts = []
     for menu in START_MENUS:
@@ -258,8 +276,49 @@ def installed_apps() -> list[Path | App]:
     return apps
 
 
+def _is_start_menu_link(path: Path) -> bool:
+    """Is this really a Start Menu shortcut, or just a path somebody wrote down?
+
+    The reason `Bash(vasper open:*)` is in the no-ask allowlist is the sentence
+    in config.py: it "takes a Start Menu shortcut and passes it no arguments, so
+    it can do no more than the user double clicking the same icon". That was
+    true by construction for as long as every target came from freshly walking
+    the Start Menu. The moment the list is cached, that guarantee rests on a
+    file instead, and a file is a far weaker thing to trust than the OS.
+
+    Without this check: one approved Write, ever, is enough to put
+
+        {"kind": "link", "path": "C:/anything.exe"}
+
+    into the index under the name "chrome", and every later `vasper open chrome`
+    launches it with nothing asked, because `vasper open` is precisely the
+    command that does not ask. That turns a single spoken yes into arbitrary
+    execution for as long as the file survives.
+    """
+    if path.suffix.lower() != ".lnk":
+        return False
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for menu in START_MENUS:
+        try:
+            resolved.relative_to(menu.resolve())
+            return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 def _read_app_index(stamp: str) -> list[Path | App] | None:
-    """The saved list, or None if it is missing, stale, or unreadable."""
+    """The saved list, or None if it is missing, stale, unreadable or untrusted.
+
+    Every entry is checked back against the shape the OS itself would have
+    produced. The cache is allowed to save the scan; it is not allowed to widen
+    what `vasper open` can launch. Anything failing that check is treated as a
+    miss rather than an error, so the answer is a rescan: a damaged index should
+    cost 600ms, not the ability to open Chrome.
+    """
     try:
         with APP_INDEX.open(encoding="utf-8") as handle:
             saved = json.load(handle)
@@ -267,14 +326,25 @@ def _read_app_index(stamp: str) -> list[Path | App] | None:
         return None
     if not isinstance(saved, dict) or saved.get("stamp") != stamp:
         return None
+    try:
+        if time.time() - APP_INDEX.stat().st_mtime > MAX_INDEX_AGE_S:
+            return None  # old enough that the stamp may have missed something
+    except OSError:
+        return None
     out: list[Path | App] = []
     for entry in saved.get("apps", []):
         try:
             if entry["kind"] == "link":
-                out.append(Path(entry["path"]))
+                link = Path(entry["path"])
+                if not _is_start_menu_link(link):
+                    return None
+                out.append(link)
             else:
-                out.append(App(entry["name"], entry["target"]))
-        except (KeyError, TypeError):
+                target = entry["target"]
+                if not isinstance(target, str) or not target.startswith(_APPSFOLDER):
+                    return None
+                out.append(App(entry["name"], target))
+        except (KeyError, TypeError, AttributeError):
             return None  # damaged, or written by an older version
     return out
 
@@ -297,7 +367,12 @@ def _write_app_index(stamp: str, apps: list[Path | App]) -> None:
             json.dump({"stamp": stamp, "apps": entries}, handle)
         temporary.replace(APP_INDEX)
     except (OSError, ValueError):
-        pass
+        # Including a replace that failed after the temporary was written, so
+        # it does not sit in var/ forever.
+        try:
+            temporary.unlink(missing_ok=True)
+        except (OSError, ValueError, NameError):
+            pass
 
 
 def _similarity(needle: str, name: str) -> float:

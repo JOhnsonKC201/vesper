@@ -36,25 +36,57 @@ from . import accel
 # Only the first of those is catchable, and only this family is worth catching:
 # nobody says goodbye to a video at their desktop assistant. Matched at any
 # length, unlike the list below.
-_VIDEO_OUTRO = re.compile(
-    r"\b("
-    # A few words of thanks are allowed to pile up in between: the real ones
-    # run "thank you all so much for watching" as readily as "thanks for
-    # watching". Bounded so it cannot reach across a whole sentence.
-    r"thanks? (?:you )?(?:\w+ ){0,4}?for watching"
-    r"|thanks? for (?:listening|joining me|tuning in)"
-    r"|(?:don'?t forget to |please |remember to |be sure to )"
-    r"(?:like(?:,| and)? )?(?:comment(?:,| and)? )?subscribe"
-    r"|subscribe to (?:my|the|our) channel"
-    r"|until next time"
-    r"|see you (?:in the )?next (?:time|video|one)"
-    r"|see you (?:all )?(?:again )?(?:very )?soon"
-    r"|i'?ll (?:see|talk to) you (?:again )?(?:next time|soon|in the next)"
-    r"|(?:subtitles?|captions?|transcription) (?:by|provided by|from)"
-    r"|hit the (?:like )?button"
-    r")\b",
+# Two shapes, and the split between them is the whole point. A first draft of
+# this matched any of these anywhere in the utterance, and a review found it
+# would silently discard eleven of thirteen ordinary sentences: "save that
+# until next time", "please subscribe me to the newsletter", "hit the button on
+# the toolbar", "see you soon". Every one of those is a thing somebody says to
+# an assistant, and dropping the utterance means Vesper ignores you with no
+# explanation, which is the failure this repo keeps deciding is the worse one.
+#
+# So: a sign-off only counts when the utterance opens with it, because that is
+# what distinguishes "Until next time, ..." from "save that until next time".
+_OUTRO_OPENER = re.compile(
+    r"^(?:and |so |well |okay |ok |alright )?"
+    r"(?:"
+    r"until next time"
+    r"|see you next time"
+    r"|see you in the next (?:video|one)"
+    r"|thanks? (?:you )?(?:\w+ ){0,4}?for watching"
+    r")",
     re.IGNORECASE,
 )
+
+# And these have no request form at all, so they count wherever they land.
+# "subscribe to my channel" is not a thing anyone asks a desktop assistant for;
+# "subscribe me to the newsletter" is, and is not this.
+_OUTRO_ANYWHERE = re.compile(
+    r"("
+    r"thanks? (?:you )?(?:\w+ ){0,4}?for watching"
+    r"|thanks? for (?:joining me|tuning in)"
+    r"|subscribe to (?:my|our|the) channel"
+    r"|like,? and subscribe|like, comment,? and subscribe"
+    r"|(?:subtitles?|captions?|transcription) by "
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_video_outro(stripped: str) -> bool:
+    """Did the decoder answer noise with the end of a video?
+
+    Trained on a great deal of video, Whisper does this constantly, and the
+    results are whole sentences rather than stock phrases, so they are too long
+    for the `duration_s < 2.0` rule and too varied to list. From the log:
+
+        HEARD Until next time, I'll talk to you again soon with Naoli Online.
+        HEARD And apart from us, we have another failed entrepreneur.
+
+    Only the first is catchable. The second is a reminder of how narrow this
+    has to stay: there is no rule that catches it without also catching real
+    speech, so it is left alone.
+    """
+    return bool(_OUTRO_OPENER.match(stripped) or _OUTRO_ANYWHERE.search(stripped))
 
 # Whisper's greatest hits when handed silence or noise. Only applied to short
 # clips, where a genuine utterance of this text is implausible.
@@ -312,11 +344,21 @@ class Listener:
         meant out of memory, and asking for a second model while the first is
         still held is how the cpu rebuild ran out of memory too.
         """
-        if self._forced_device == "cpu":
-            return False  # already on the cpu; there is nowhere left to go
-        self._log(f"whisper gpu failed ({reason}), moving to cpu for this session")
-        self._forced_device = "cpu"
-        self._release()
+        # The same lock `load()` takes, for the same reason: this releases a
+        # model and builds another, and two threads doing that at once is the
+        # out-of-memory this whole method exists to recover from. Only one
+        # thread reaches here today, but `load()`'s docstring promises any
+        # thread may call it, and an invariant held by luck is not held.
+        with self._load_lock:
+            if self._forced_device == "cpu":
+                return False  # already on the cpu; there is nowhere left to go
+            self._log(f"whisper gpu failed ({reason}), moving to cpu for this session")
+            self._forced_device = "cpu"
+            self._release()
+            return self._build_cpu_fallback()
+
+    def _build_cpu_fallback(self) -> bool:
+        """Build the cpu replacement. Caller holds `_load_lock`."""
         try:
             self._build("cpu", accel.best_compute_type("cpu"))
         except Exception as exc:
@@ -456,10 +498,10 @@ class Listener:
         if transcript.duration_s < 2.0 and stripped in HALLUCINATIONS:
             return "hallucination"
 
-        # The end of a video, at any length. This one has no duration rule
-        # because that is exactly what let it through: the log's example runs
-        # to eleven words. Nobody signs off from a video at their assistant.
-        if _VIDEO_OUTRO.search(stripped):
+        # The end of a video, at any length. No duration rule here, because
+        # that is exactly what let the log's example through: it runs to eleven
+        # words. See `_is_video_outro` for how narrow this has to be.
+        if _is_video_outro(stripped):
             return "hallucination"
         return ""
 

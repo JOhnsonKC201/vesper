@@ -3,6 +3,9 @@
 The safety tests come first, because this is the file that gained a mouse.
 """
 
+import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -428,8 +431,11 @@ def test_installing_something_new_rebuilds_the_list(tmp_path, monkeypatch):
 
 def test_shortcuts_and_store_apps_both_survive_the_round_trip(tmp_path, monkeypatch):
     """A Path and an App are different things and both have to come back."""
+    menu = tmp_path / "Start Menu" / "Programs"
+    menu.mkdir(parents=True)
+    monkeypatch.setattr(tool, "START_MENUS", (menu,))
     monkeypatch.setattr(tool, "APP_INDEX", tmp_path / "apps.json")
-    link = tmp_path / "Visual Studio Code.lnk"
+    link = menu / "Visual Studio Code.lnk"
     link.write_text("", encoding="utf-8")
     original = [link, tool.App("Calculator", r"shell:AppsFolder\calc!App")]
 
@@ -444,6 +450,85 @@ def test_shortcuts_and_store_apps_both_survive_the_round_trip(tmp_path, monkeypa
     assert isinstance(restored[1], tool.App)
     assert str(restored[1]) == r"shell:AppsFolder\calc!App"
     assert restored[1].stem == "Calculator"
+
+
+def test_a_poisoned_index_cannot_make_vasper_open_launch_anything(tmp_path, monkeypatch):
+    """The reason `Bash(vasper open:*)` is allowed to run without asking.
+
+    config.py justifies that entry with "vasper open takes a Start Menu
+    shortcut and passes it no arguments, so it can do no more than the user
+    double clicking the same icon". That was true by construction while every
+    target came from walking the Start Menu live. Caching the list moved the
+    guarantee into a file, and a file can be written to.
+
+    The path that matters: one approved Write, ever, puts an arbitrary path in
+    var/apps.json under a name like "chrome". Every later `vasper open chrome`
+    then launches it through os.startfile with nothing asked, because open is
+    exactly the command that does not ask. One yes becomes permanent silent
+    execution. So the index is checked on read against the shape the OS would
+    have produced, and anything else is a cache miss.
+    """
+    menu = tmp_path / "Start Menu" / "Programs"
+    menu.mkdir(parents=True)
+    monkeypatch.setattr(tool, "START_MENUS", (menu,))
+    index = tmp_path / "apps.json"
+    monkeypatch.setattr(tool, "APP_INDEX", index)
+    monkeypatch.setattr(tool, "_menus_stamp", lambda: "stamp")
+
+    honest = menu / "Chrome.lnk"
+    honest.write_text("", encoding="utf-8")
+    rescans = []
+    monkeypatch.setattr(
+        tool, "_scan_apps", lambda: rescans.append(1) or [honest]
+    )
+
+    poisons = [
+        # A path that is not a shortcut at all.
+        {"kind": "link", "path": str(tmp_path / "evil.exe")},
+        # A shortcut, but not one the Start Menu ever offered.
+        {"kind": "link", "path": str(tmp_path / "evil.lnk")},
+        # Climbing back out of the Start Menu with a relative hop.
+        {"kind": "link", "path": str(menu / ".." / ".." / "evil.lnk")},
+        # An "app" whose target is a command rather than an AppsFolder id.
+        {"kind": "app", "name": "Chrome", "target": "cmd.exe /c whoami"},
+        {"kind": "app", "name": "Chrome", "target": str(tmp_path / "evil.exe")},
+    ]
+    for poison in poisons:
+        index.write_text(
+            json.dumps({"stamp": "stamp", "apps": [poison]}), encoding="utf-8"
+        )
+        rescans.clear()
+        apps = tool.installed_apps()
+        assert rescans, f"the poisoned entry was trusted: {poison}"
+        assert apps == [honest], f"a poisoned target survived: {poison}"
+        for app in apps:
+            assert "evil" not in str(app).lower()
+            assert "cmd.exe" not in str(app).lower()
+
+
+def test_an_index_older_than_the_ceiling_is_rescanned(tmp_path, monkeypatch):
+    """`_menus_stamp` cannot see every install, so age is the backstop.
+
+    A shortcut dropped into an existing subfolder does not move the top level
+    mtime, and the shell AppsFolder is invisible to it entirely, so without a
+    ceiling an app installed today could stay missing from the list forever.
+    """
+    index = tmp_path / "apps.json"
+    monkeypatch.setattr(tool, "APP_INDEX", index)
+    monkeypatch.setattr(tool, "_menus_stamp", lambda: "unchanging")
+    scans = []
+    monkeypatch.setattr(
+        tool, "_scan_apps", lambda: scans.append(1) or [tool.App("Notepad", r"shell:AppsFolder\n")]
+    )
+
+    tool.installed_apps()
+    tool.installed_apps()
+    assert len(scans) == 1, "the stamp did not move, so this should be cached"
+
+    old = time.time() - tool.MAX_INDEX_AGE_S - 60
+    os.utime(index, (old, old))
+    tool.installed_apps()
+    assert len(scans) == 2, "an index past the ceiling was still trusted"
 
 
 def test_a_damaged_index_is_rebuilt_rather_than_fatal(tmp_path, monkeypatch):

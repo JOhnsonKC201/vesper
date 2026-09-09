@@ -239,8 +239,9 @@ class Conversation:
         self._speaking_since = 0.0
         self._barge_run = 0
         self._overflows_said_at = 0.0
-        # Model loads started by `start()` and never joined. Kept so `stop()`
-        # can tell whether one is still running.
+        # Model loads started by `start()` and joined, briefly, by `stop()`, so
+        # that start and stop can be cycled inside one process without a warm
+        # thread from the last generation still writing into this one.
         self._warming: list[threading.Thread] = []
         # Both deques above are written by whichever thread is speaking, and
         # the proactive loop speaks from its own. They are read by two others:
@@ -415,6 +416,18 @@ class Conversation:
         self.mic.stop()
         self.speaker.close()
         self.brain.stop()
+        # The warm threads, last and briefly. They are daemons, so process exit
+        # reaps them either way and this changes nothing about shutting down;
+        # what it does is make start() and stop() safe to cycle inside one
+        # process, which the dashboard and the tests both do. Without it a warm
+        # thread from the previous generation is still building a model into
+        # `self.stt` after the next one has begun.
+        #
+        # A bounded wait, like `Speaker.close`, and for the same reason:
+        # shutting down must not sit behind a model load.
+        for thread in self._warming:
+            thread.join(timeout=2.0)
+        self._warming = []
 
     def transcript(self) -> tuple[tuple[str, str], ...]:
         """The conversation so far, oldest first, as ("you"|"vasper", text).

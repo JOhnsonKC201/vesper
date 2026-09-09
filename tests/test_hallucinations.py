@@ -128,19 +128,40 @@ def test_the_video_outro_family_is_rejected_at_any_length():
         "Thank you all so much for watching!",
         "Don't forget to like and subscribe.",
         "Please subscribe to my channel.",
-        "Subtitles by the community",
+        "Subtitles by the Amara.org community",
         "See you next time.",
+        "And thanks for watching everyone.",
     ):
         result = Transcript(text=invented, duration_s=6.0, avg_logprob=-0.2)
         assert stt._post_gate(result) == "hallucination", f"let through: {invented!r}"
 
 
-def test_real_speech_that_shares_words_with_an_outro_still_gets_through():
-    """The cost of being wrong here is Vesper ignoring you, so it must be
-    narrow. None of these is a sign-off and every one is a plausible thing to
-    say to a desktop assistant."""
+def test_ordinary_speech_that_shares_words_with_an_outro_gets_through():
+    """The list below is the review that nearly did not happen.
+
+    A first version of this filter matched any outro phrase anywhere in the
+    utterance. Eleven of these thirteen would have been discarded in silence,
+    and a discarded utterance is Vesper ignoring you for no stated reason,
+    which this repo has repeatedly decided is the worse failure. The fix was
+    to require a sign-off to open the utterance: "Until next time, ..." is one,
+    "save that until next time" is a request.
+    """
     stt = Listener()
     for genuine in (
+        # Every one of these was silently dropped by the first version.
+        "Please subscribe me to the newsletter on that page.",
+        "Save that until next time.",
+        "Leave it until next time then.",
+        "Thanks for listening to me ramble.",
+        "See you soon.",
+        "I will see you soon at the meeting.",
+        "Hit the button on the toolbar.",
+        "Hit the like button on that post for me.",
+        "Remember to subscribe to the mailing list.",
+        "Be sure to subscribe me to updates.",
+        "Read me the captions from that video.",
+        "Transcription from the meeting please.",
+        # And the ones that were always fine, kept as a floor.
         "Thanks, that is exactly what I needed.",
         "Subscribe me to the newsletter on that page.",
         "What am I watching on Tuesday?",
@@ -148,6 +169,18 @@ def test_real_speech_that_shares_words_with_an_outro_still_gets_through():
         "See you later, I am off to lunch.",
         "Next time remind me to run the tests first.",
         "Can you like the top comment for me?",
+        "I will talk to you next time.",
     ):
         result = Transcript(text=genuine, duration_s=3.0, avg_logprob=-0.2)
         assert stt._post_gate(result) == "", f"wrongly dropped: {genuine!r}"
+
+
+def test_the_outro_filter_cannot_be_made_slow_by_a_long_utterance():
+    """It runs on every transcription, so it may not be a backtracking trap."""
+    import time as _time
+
+    stt = Listener()
+    for hostile in ("thanks " * 4000, "word " * 20000, "a" * 60000):
+        started = _time.monotonic()
+        stt._post_gate(Transcript(text=hostile, duration_s=9.0, avg_logprob=-0.2))
+        assert _time.monotonic() - started < 0.5, "the outro filter backtracked"
