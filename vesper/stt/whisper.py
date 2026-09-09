@@ -199,8 +199,12 @@ class Listener:
         # still says `auto`.
         self._forced_device: str | None = None
         self._load_lock = threading.Lock()
-        # Surfaced by --check and the dashboard: a silent assistant with a
-        # rising failure count is a very different bug from a deaf one.
+        # Counted here, read by nothing yet. The comment used to say it was
+        # surfaced by --check and the dashboard, and it is not: --check builds
+        # its own Listener, which has by definition never failed. The count is
+        # still the right thing to keep, because a silent assistant with a
+        # rising failure count is a very different bug from a deaf one, but
+        # whoever wires it up should not find a comment claiming it is done.
         self.failures = 0
 
     # --- model --------------------------------------------------------------

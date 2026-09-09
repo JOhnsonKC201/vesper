@@ -167,8 +167,21 @@ def test_the_combined_block_stays_inside_the_same_budget():
     worst.note_idle(1200.0)
     for tick in range(6):
         worst.note_turn("Code.exe", now=float(tick))
+
+    # A fixed window title rather than this machine's. `context_block()` reads
+    # the live foreground window, so the budget being measured here included
+    # whatever happened to be on screen at the time. It failed once against a
+    # Chrome tab showing a long commit subject: 427 characters, none of them
+    # the register's doing. What this test is about is the register's own
+    # contribution, so the rest of the block is held still.
+    ambient = "\n".join(
+        "focused window: chrome.exe: a window title of ordinary length"
+        if line.startswith("focused window:")
+        else line
+        for line in sensors.context_block().splitlines()
+    )
     combined = attach(
-        sensors.context_block(),
+        ambient,
         worst.line(now=LONG_SESSION_S + 1, clock=clock(23, 55)),
     )
     assert len(combined) < 400, f"{len(combined)} chars:\n{combined}"

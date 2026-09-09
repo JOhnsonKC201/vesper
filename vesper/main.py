@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import autostart as autostart_module
 from . import config as config_module
+from . import console
 from . import desktop as desktop_module
 from . import resume as resume_module
 from . import single
@@ -163,7 +164,7 @@ def build_voice(cfg: config_module.Config, ui: TerminalUI):
     return cloud, f"{cloud.name} over {label}"
 
 
-def build(cfg: config_module.Config, *, with_mic: bool = True):
+def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = False):
     ui = TerminalUI(show_cost=cfg.ui.show_cost)
     # Tee diagnostics to a file before anything else can fail, because
     # started from your login there is no console to print them to.
@@ -196,7 +197,7 @@ def build(cfg: config_module.Config, *, with_mic: bool = True):
         # With -v the brain's lines share the console. Without it they still
         # go to the file, tagged BRAIN: on 2026-09-04 the child failed every
         # turn for an evening and the log had no trace of a brain at all.
-        log=ui.info if "-v" in sys.argv else (lambda message: log.write("brain", message)),
+        log=ui.info if verbose else (lambda message: log.write("brain", message)),
     )
 
     stt = Listener(
@@ -441,7 +442,8 @@ def say_on_screen(*lines: str, title: str = "Vesper") -> bool:
         return False
 
 
-def run_voice(cfg: config_module.Config, *, if_idle: bool = False) -> int:
+def run_voice(cfg: config_module.Config, *, if_idle: bool = False,
+               verbose: bool = False) -> int:
     if not single.claim():
         if if_idle:
             # The resume task fires on every unlock, and Vesper is usually
@@ -463,7 +465,7 @@ def run_voice(cfg: config_module.Config, *, if_idle: bool = False) -> int:
         say_on_screen(headline, "", detail)
         return 1
 
-    conversation, ui, voice_label = build(cfg)
+    conversation, ui, voice_label = build(cfg, verbose=verbose)
     ui.banner(
         brain=f"{cfg.brain.model} via claude cli, safe mode",
         voice=voice_label,
@@ -497,9 +499,10 @@ def run_voice(cfg: config_module.Config, *, if_idle: bool = False) -> int:
     return 0
 
 
-def run_text(cfg: config_module.Config, one_shot: str = "") -> int:
+def run_text(cfg: config_module.Config, one_shot: str = "", *,
+             verbose: bool = False) -> int:
     """Type instead of talk. The fastest way to test without a microphone."""
-    conversation, ui, voice_label = build(cfg)
+    conversation, ui, voice_label = build(cfg, verbose=verbose)
     ui.banner(
         brain=f"{cfg.brain.model} via claude cli, safe mode",
         voice=voice_label,
@@ -663,18 +666,8 @@ def check(cfg: config_module.Config, *, gate: bool = True) -> int:
 # --- cli --------------------------------------------------------------------
 
 
-def _force_utf8_console() -> None:
-    """Windows consoles default to a legacy code page, which mangles anything
-    outside ASCII into question marks."""
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-
-
 def main(argv: list[str] | None = None) -> int:
-    _force_utf8_console()
+    console.force_utf8()
     parser = argparse.ArgumentParser(prog="vesper", description="A copilot you talk to.")
     parser.add_argument("--config", help="path to config.yaml")
     parser.add_argument("--text", action="store_true", help="type instead of speaking")
@@ -746,10 +739,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return check(cfg, gate=not args.offline)
     if args.say:
-        return run_text(cfg, one_shot=args.say)
+        return run_text(cfg, one_shot=args.say, verbose=args.verbose)
     if args.text:
-        return run_text(cfg)
-    return run_voice(cfg, if_idle=args.if_idle)
+        return run_text(cfg, verbose=args.verbose)
+    return run_voice(cfg, if_idle=args.if_idle, verbose=args.verbose)
 
 
 if __name__ == "__main__":

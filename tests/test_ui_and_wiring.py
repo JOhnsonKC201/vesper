@@ -438,7 +438,7 @@ def test_devices_flag_lists_microphones(capsys):
 def test_no_voice_flag_silences_the_assistant(monkeypatch):
     seen = {}
 
-    def fake_run_text(cfg, one_shot=""):
+    def fake_run_text(cfg, one_shot="", *, verbose=False):
         seen["engine"] = cfg.voice.engine
         return 0
 

@@ -217,7 +217,14 @@ class Endpointer:
         return None
 
     def flush(self) -> np.ndarray | None:
-        """Force-close whatever is being collected. Used on shutdown."""
+        """Force-close whatever is being collected.
+
+        Nothing in the package calls this. The docstring used to say "used on
+        shutdown", which was true of no code path; what actually uses it is
+        tests/test_vad.py, which needs to close an utterance without feeding in
+        another second of silence to do it. That is a fair reason to exist and
+        a bad reason to claim a different one.
+        """
         return self._finish() if self._collecting else None
 
     def _finish(self) -> np.ndarray | None:

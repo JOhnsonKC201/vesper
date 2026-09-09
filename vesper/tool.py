@@ -46,6 +46,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import console
 from .sensors.window import _SENSITIVE
 from . import hands
 
@@ -798,25 +799,9 @@ def _match_the_real_pixels() -> None:
             continue
 
 
-def _force_utf8() -> None:
-    """Window titles are full of unicode and Windows still defaults to cp1252.
-
-    Real titles on this machine right now carry U+2733 and U+25D1, and printing
-    them through a redirected pipe raised UnicodeEncodeError and returned a
-    failure for a command that had worked. The brain sets PYTHONIOENCODING for
-    its own child, but this runs as a grandchild through a .cmd shim, so it
-    settles the question itself rather than trusting what it inherited.
-    """
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError):
-            pass
-
-
 def main(argv: list[str] | None = None) -> int:
     _match_the_real_pixels()
-    _force_utf8()
+    console.force_utf8()
     args = build_parser().parse_args(argv)
     try:
         return args.run(args)

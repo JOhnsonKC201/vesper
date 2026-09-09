@@ -1455,6 +1455,31 @@ class Conversation:
         # mark he is waiting on an answer, and the window is held open for it.
         last_spoken = ""
 
+        def say_sentence(sentence: str) -> None:
+            """Speak one sentence of the answer, and remember that we did.
+
+            This was written out three times below, once for the streaming
+            deltas, once for the tail the router had buffered, and once for
+            whatever the assembler was still holding. All three had to agree
+            about the refusal check and about which locals to update, and one
+            of them did not: the middle copy never set `spoke_at`, so a turn
+            whose only speech arrived in the tail reported no first speech time
+            at all. That is a number in the register rather than anything the
+            user hears, but it was wrong, and it was wrong because the rule
+            lived in three places.
+            """
+            nonlocal spoke_at, spoken_anything, last_spoken
+            # Once something has been refused this turn, anything that only
+            # restates the refusal is dropped: the question about to be asked
+            # says it better, and says it correctly.
+            if requests and is_refusal_noise(sentence):
+                return
+            if spoke_at is None:
+                spoke_at = time.monotonic()
+            spoken_anything = True
+            last_spoken = sentence
+            self._say(sentence)
+
         requests: list[ActionRequest] = []
         seen: set[str] = set()
         # Tool calls that ran on this grant without being the thing it was
@@ -1477,16 +1502,7 @@ class Conversation:
                     self.ui.screen(screen_buffer.strip())
                     screen_buffer = ""
                 for sentence in assembler.feed(spoken_delta):
-                    # Once something has been refused this turn, anything that
-                    # only restates the refusal is dropped: the question about
-                    # to be asked says it better, and says it correctly.
-                    if requests and is_refusal_noise(sentence):
-                        continue
-                    if spoke_at is None:
-                        spoke_at = time.monotonic()
-                    spoken_anything = True
-                    last_spoken = sentence
-                    self._say(sentence)
+                    say_sentence(sentence)
 
             elif isinstance(event, ToolStarted):
                 self.ui.tool(event.name, event.detail)
@@ -1538,21 +1554,13 @@ class Conversation:
 
                 spoken_tail, screen_tail = router.flush()
                 for sentence in assembler.feed(spoken_tail):
-                    if requests and is_refusal_noise(sentence):
-                        continue
-                    spoken_anything = True
-                    last_spoken = sentence
-                    self._say(sentence)
+                    say_sentence(sentence)
                 leftover = (screen_buffer + screen_tail).strip()
                 if leftover:
                     self.ui.screen(leftover)
                 tail = assembler.flush()
-                if tail and not (requests and is_refusal_noise(tail)):
-                    if spoke_at is None:
-                        spoke_at = time.monotonic()
-                    spoken_anything = True
-                    last_spoken = tail
-                    self._say(tail)
+                if tail:
+                    say_sentence(tail)
 
                 # Fallback for a turn that produced no streaming deltas at all.
                 # Partial messages can be absent, and silence would look like a
