@@ -1,6 +1,18 @@
-# Vesper
+<h1 align="center">Vesper</h1>
 
-A copilot you talk to, out loud, that knows what is happening on your computer.
+<p align="center">
+  <em>A copilot you talk to, out loud, that knows what is happening on your computer.</em>
+</p>
+
+<p align="center">
+  <a href="https://github.com/JOhnsonKC201/vesper/actions/workflows/tests.yml">
+    <img alt="tests" src="https://github.com/JOhnsonKC201/vesper/actions/workflows/tests.yml/badge.svg">
+  </a>
+  <img alt="Python 3.13" src="https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white">
+  <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white">
+  <img alt="runs on Claude Code" src="https://img.shields.io/badge/brain-Claude%20Code%20CLI-D97757">
+  <img alt="no API key" src="https://img.shields.io/badge/API%20key-none-2E9FD4">
+</p>
 
 It runs on **Claude Code the CLI**, not the Anthropic API. There is no API key
 anywhere. It uses the subscription you already pay for.
@@ -17,6 +29,39 @@ vesper  The WMI reading undercounts it at four gigabytes, that's a known quirk,
 ```
 
 That exchange is real output, not a mockup.
+
+---
+
+<table>
+<tr><td valign="top" width="33%">
+
+**Getting it running**
+- [Run it](#run-it)
+- [Running from your login](#running-from-your-login)
+- [How long before it can hear you](#how-long-before-it-can-hear-you)
+- [Configuration](#configuration)
+- [Tests](#tests)
+
+</td><td valign="top" width="33%">
+
+**How it works**
+- [The pipeline](#how-it-works)
+- [The flag that makes this viable](#the-flag-that-makes-this-viable)
+- [Latency budget](#latency-budget)
+- [Whisper on the gpu](#whisper-on-the-gpu)
+- [The cloud voice, measured](#the-cloud-voice-measured)
+
+</td><td valign="top" width="33%">
+
+**What it does, and will not do**
+- [What leaves this machine](#what-leaves-this-machine)
+- [What it may and may not do](#what-it-may-and-may-not-do)
+- [The three things that make it feel human](#the-three-things-that-make-it-feel-human)
+- [It remembers](#it-remembers)
+- [Known limits](#known-limits)
+
+</td></tr>
+</table>
 
 ---
 
@@ -245,21 +290,71 @@ about changing things; reading is deliberately ungated.
 
 ## How it works
 
+Audio comes in on the PortAudio thread, is turned into whole utterances on the
+processing thread, and only then does anything expensive happen. Nothing below
+the wake gate runs at idle, which is what keeps an always-on assistant inside a
+CPU budget.
+
+```mermaid
+flowchart TD
+    MIC["Microphone<br/>30 ms float32 blocks"]
+    VAD["Silero VAD<br/>speech or not, per block"]
+    EP["Endpointer<br/>400 ms lead-in<br/>700 ms ends the turn"]
+    STT["Whisper small.en<br/>130 ms on the gpu"]
+    WAKE{"Named, or is the<br/>window still open?"}
+    VP{"Voiceprint<br/>WeSpeaker ResNet34"}
+    DROP["Dropped, and written<br/>to the log either way"]
+    SENS["Sensors<br/>window title, screen,<br/>battery, network"]
+    BRAIN["claude -p --safe-mode<br/>one long-lived process<br/>one session, many turns"]
+    ASM["Sentence assembler"]
+    TTS["Piper<br/>31x realtime"]
+    SPK["Speakers"]
+    SCR["Screen blocks"]
+    UI["Terminal and dashboard"]
+
+    MIC --> VAD --> EP --> STT --> WAKE
+    WAKE -->|no| DROP
+    WAKE -->|yes| VP
+    VP -->|clearly someone else| DROP
+    VP -->|you, or unsure| BRAIN
+    SENS -->|attached to every turn| BRAIN
+    BRAIN --> ASM --> TTS --> SPK
+    BRAIN --> SCR --> UI
 ```
-  mic  ->  VAD  ->  endpointer  ->  whisper  ->  wake gate
-                                                    |
-                                                    v
-                                    claude -p (persistent, safe mode)
-                                                    |
-                                  text deltas -> sentences -> piper -> speakers
-                                                    |
-                                              screen blocks -> terminal
-```
+
+Everything above the wake gate runs on every block, forever, which is why it is
+all cheap. Whisper, the voiceprint and the brain are reached a handful of times
+an hour, only after something has actually been said. Talk over it while it is
+speaking and the speaker stops mid-sentence, which the state diagram below
+covers.
 
 The brain is one long-lived `claude` process spoken to over its `stream-json`
 protocol. One process, one session, many turns, so it remembers the whole
 conversation. Sensors attach a small block of machine context to every turn, so
 "what am I looking at" and "why is this failing" work without you explaining.
+
+For the module-by-module version of this, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+### Taking turns
+
+The hard part of a voice assistant is not transcription, it is knowing when it
+is your turn. Vesper hears its own voice through the same microphone, so every
+state below has to know what it just said.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Asleep
+    Asleep --> Listening: hears its name
+    Listening --> Thinking: 700 ms of silence
+    Thinking --> Asking: wants to change something
+    Asking --> Thinking: you say yes
+    Asking --> Speaking: you say no, or 30 s passes
+    Thinking --> Speaking: first sentence is ready
+    Speaking --> Listening: window held open 25 s
+    Speaking --> Listening: you talk over it
+    Listening --> Asleep: window closes
+    Asleep --> Asleep: everything else in the room
+```
 
 ### The flag that makes this viable
 
@@ -565,6 +660,33 @@ processes, git state, the focused window, system vitals. `brain.add_dirs` says
 data it cannot look at when a question needs it.
 
 It changes nothing until you say yes out loud.
+
+```mermaid
+flowchart TD
+    REQ["Claude asks to use a tool"]
+    ALLOW{"On the no-ask list?<br/>reads, and the things<br/>that only ever look"}
+    RUN["Runs immediately"]
+    SAY["Vesper says out loud<br/>what it wants to do"]
+    ANS{"You answer"}
+    COPY["A copy is kept first"]
+    ACT["The action runs"]
+    RESTORE["The copy goes back"]
+    NO["Declined, and Claude<br/>is told why"]
+    LAPSE["Lapses after 30 s,<br/>which counts as no"]
+    LOG["var/actions.log<br/>every decision, either way"]
+
+    REQ --> ALLOW
+    ALLOW -->|yes| RUN --> LOG
+    ALLOW -->|no| SAY --> ANS
+    ANS -->|"a plain yes, granted<br/>for this turn only"| COPY --> ACT --> LOG
+    ANS -->|no| NO --> LOG
+    ANS -->|nothing| LAPSE --> LOG
+    ACT -.->|"you say 'undo that'"| RESTORE --> LOG
+```
+
+A conditional yes is not a yes. Nothing on the no-ask list is allowed to change
+anything or send anything off the machine, which is why `WebSearch`, `find`,
+`wmic` and a PowerShell `Get-*` wildcard were all taken off it after review.
 
 ```
 you     Vesper, commit that fix.
