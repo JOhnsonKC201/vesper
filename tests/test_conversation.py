@@ -5,6 +5,7 @@ to produces speech, whether interrupting it shuts it up, and whether it can tell
 its own voice from yours.
 """
 
+import threading
 import time
 
 import numpy as np
@@ -496,3 +497,94 @@ def test_overflows_are_not_reported_more_than_once_a_minute():
     said = [line for line in ui.warnings if "dropped audio" in line]
     assert len(said) == 1
     assert conv.mic.overflows == 4, "the second burst is still being counted up"
+
+
+# --- two threads, one deque -------------------------------------------------
+
+
+def test_the_echo_filter_survives_being_spoken_to_from_another_thread():
+    """`_is_own_voice` iterates `_spoken_recently`, which `_say` pops from.
+
+    The proactive loop speaks from its own thread, so the two really do run at
+    once, and `_spoken_recently` has a maxlen, so an append also pops.
+
+    A smoke test rather than a reproduction, and worth saying so. The bare
+    pattern does raise "deque mutated during iteration" in about three seconds
+    with three writers, but it could not be provoked through this function even
+    with sys.setswitchinterval at a microsecond, because nearly all of the time
+    here goes on regex and set work rather than on the loop. What this catches
+    is somebody removing the lock and something much more exposed taking its
+    place, which is the regression worth catching.
+    """
+    conv, _brain, _stt, _voice, speaker, _ui = build()
+    stop = threading.Event()
+    raced = []
+
+    def keep_saying():
+        count = 0
+        while not stop.is_set():
+            count += 1
+            conv._remember_said(f"the battery is at eighty percent, reading {count}")
+
+    def keep_checking():
+        while not stop.is_set():
+            try:
+                conv._is_own_voice("the battery is at eighty percent and charging")
+            except RuntimeError as exc:  # deque mutated during iteration
+                raced.append(str(exc))
+                return
+
+    writers = [threading.Thread(target=keep_saying, daemon=True) for _ in range(3)]
+    checker = threading.Thread(target=keep_checking, daemon=True)
+    for thread in writers:
+        thread.start()
+    checker.start()
+    time.sleep(3.0)
+    stop.set()
+    for thread in writers + [checker]:
+        thread.join(timeout=5)
+    speaker.close()
+
+    assert not raced, f"the echo filter raced the writer: {raced}"
+
+
+def test_the_transcript_can_be_read_while_it_is_being_written():
+    """The dashboard reads this on its own thread once a second.
+
+    `tuple(deque)` turns out to be safe on its own: CPython builds it in one C
+    call that never yields, and three writers for three seconds could not
+    disturb it. The lock is here anyway, because that is an implementation
+    detail rather than a promise, and it is exactly the promise a free threaded
+    build takes away. It costs a handful of microseconds once a second.
+    """
+    conv, _brain, _stt, _voice, speaker, _ui = build()
+    stop = threading.Event()
+    raced = []
+
+    def keep_saying():
+        count = 0
+        while not stop.is_set():
+            count += 1
+            conv._remember_said(f"line number {count}")
+            conv._remember_heard(f"and a reply to {count}")
+
+    def keep_reading():
+        while not stop.is_set():
+            try:
+                assert isinstance(conv.transcript(), tuple)
+            except RuntimeError as exc:
+                raced.append(str(exc))
+                return
+
+    writers = [threading.Thread(target=keep_saying, daemon=True) for _ in range(3)]
+    reader = threading.Thread(target=keep_reading, daemon=True)
+    for thread in writers:
+        thread.start()
+    reader.start()
+    time.sleep(1.5)
+    stop.set()
+    for thread in writers + [reader]:
+        thread.join(timeout=5)
+    speaker.close()
+
+    assert not raced, f"transcript() raced the writer: {raced}"

@@ -239,6 +239,26 @@ class Conversation:
         self._speaking_since = 0.0
         self._barge_run = 0
         self._overflows_said_at = 0.0
+        # Both deques above are written by whichever thread is speaking, and
+        # the proactive loop speaks from its own. They are read by two others:
+        # the audio loop in `_is_own_voice`, and the dashboard in
+        # `transcript()`. Both have a maxlen, so an append also pops, and
+        # popping while another thread iterates raises "deque mutated during
+        # iteration".
+        #
+        # Honest about what this is: hardening, not a fix for anything seen.
+        # The bare pattern does race, in about three seconds with three
+        # writers, but it could not be provoked through either real function
+        # even with sys.setswitchinterval at a microsecond. `transcript()` is
+        # safe because CPython builds a tuple from a deque in one C call that
+        # never yields, and `_is_own_voice` spends nearly all of its time in
+        # regex and set work rather than in the loop itself.
+        #
+        # It is kept because both of those are implementation details rather
+        # than promises, the second one is luck, and the first is precisely
+        # what a free threaded build removes. The cost is a lock taken a few
+        # times a turn.
+        self._said_lock = threading.Lock()
         self.turns = 0
         self.interruptions = 0
         self.echo_rejections = 0
@@ -358,8 +378,12 @@ class Conversation:
         A fresh tuple every call, not the deque. The dashboard thread reads
         this while the audio loop is appending to it, and handing out the live
         object would be handing out a race.
+
+        Building the tuple is itself an iteration, so it is taken under the
+        lock. Without it the copy was as exposed as the deque would have been.
         """
-        return tuple(self._transcript)
+        with self._said_lock:
+            return tuple(self._transcript)
 
     @property
     def locked_out(self) -> bool:
@@ -645,7 +669,7 @@ class Conversation:
             # Only what was addressed to it. Everything said in the room goes
             # past the microphone, and a transcript of the room is a different
             # and much more intrusive thing than a record of the conversation.
-            self._transcript.append(("you", transcript.text))
+            self._remember_heard(transcript.text)
         if not result.triggered:
             # Not addressed to Vesper, so a pending question stays pending and
             # unanswered. Both halves matter: a "yes" said to someone else in
@@ -757,14 +781,28 @@ class Conversation:
             return True
         return answer in (YES, QUALIFIED) and result.reason == "wake-word"
 
+    def _remember_heard(self, text: str) -> None:
+        """Record something the user said. Callable from any thread."""
+        with self._said_lock:
+            self._transcript.append(("you", text))
+
+    def _remember_said(self, line: str) -> None:
+        """Record something Vesper said. Callable from any thread, and is:
+        the proactive loop speaks from its own."""
+        with self._said_lock:
+            self._spoken_recently.append(line)
+            self._transcript.append(("vasper", line))
+
     def _is_own_voice(self, text: str) -> bool:
         """Did the mic pick up Vesper's own speech coming out of the speakers?"""
-        if not self._spoken_recently:
-            return False
         heard = set(_WORDS.findall(text.lower()))
         if len(heard) < 2:
             return False
-        for line in self._spoken_recently:
+        # Snapshotted rather than iterated. The proactive loop speaks from its
+        # own thread, and an append here pops the oldest, which is a mutation.
+        with self._said_lock:
+            recent = list(self._spoken_recently)
+        for line in recent:
             said = set(_WORDS.findall(line.lower()))
             if not said:
                 continue
@@ -807,8 +845,7 @@ class Conversation:
         line = clean_for_speech(line)
         if not line:
             return
-        self._spoken_recently.append(line)
-        self._transcript.append(("vasper", line))
+        self._remember_said(line)
         if not self.speaker.speaking:
             self._speaking_since = time.monotonic()
         self.speaker.say(line)
@@ -1212,7 +1249,7 @@ class Conversation:
         # Typed, so it came from someone with the keyboard. That is a stronger
         # identity check than any voiceprint.
         self._voice_confirmed = True
-        self._transcript.append(("you", text))
+        self._remember_heard(text)
         if self._consent_is_live():
             if self._settle_consent(text, echo=False):
                 return
