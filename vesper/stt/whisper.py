@@ -15,13 +15,78 @@ answers phantom sentences is worse than one that mishears.
 
 from __future__ import annotations
 
+import gc
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from . import accel
+
+# The other kind, and the reason the exact list below is not enough. Trained on
+# a great deal of video, Whisper answers noise with the end of a video, and
+# those are whole sentences rather than stock phrases, so they are too long for
+# the `duration_s < 2.0` rule and too varied to list. Straight out of the log:
+#
+#     HEARD Until next time, I'll talk to you again soon with Naoli Online.
+#     HEARD And apart from us, we have another failed entrepreneur.
+#
+# Only the first of those is catchable, and only this family is worth catching:
+# nobody says goodbye to a video at their desktop assistant. Matched at any
+# length, unlike the list below.
+# Two shapes, and the split between them is the whole point. A first draft of
+# this matched any of these anywhere in the utterance, and a review found it
+# would silently discard eleven of thirteen ordinary sentences: "save that
+# until next time", "please subscribe me to the newsletter", "hit the button on
+# the toolbar", "see you soon". Every one of those is a thing somebody says to
+# an assistant, and dropping the utterance means Vesper ignores you with no
+# explanation, which is the failure this repo keeps deciding is the worse one.
+#
+# So: a sign-off only counts when the utterance opens with it, because that is
+# what distinguishes "Until next time, ..." from "save that until next time".
+_OUTRO_OPENER = re.compile(
+    r"^(?:and |so |well |okay |ok |alright )?"
+    r"(?:"
+    r"until next time"
+    r"|see you next time"
+    r"|see you in the next (?:video|one)"
+    r"|thanks? (?:you )?(?:\w+ ){0,4}?for watching"
+    r")",
+    re.IGNORECASE,
+)
+
+# And these have no request form at all, so they count wherever they land.
+# "subscribe to my channel" is not a thing anyone asks a desktop assistant for;
+# "subscribe me to the newsletter" is, and is not this.
+_OUTRO_ANYWHERE = re.compile(
+    r"("
+    r"thanks? (?:you )?(?:\w+ ){0,4}?for watching"
+    r"|thanks? for (?:joining me|tuning in)"
+    r"|subscribe to (?:my|our|the) channel"
+    r"|like,? and subscribe|like, comment,? and subscribe"
+    r"|(?:subtitles?|captions?|transcription) by "
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_video_outro(stripped: str) -> bool:
+    """Did the decoder answer noise with the end of a video?
+
+    Trained on a great deal of video, Whisper does this constantly, and the
+    results are whole sentences rather than stock phrases, so they are too long
+    for the `duration_s < 2.0` rule and too varied to list. From the log:
+
+        HEARD Until next time, I'll talk to you again soon with Naoli Online.
+        HEARD And apart from us, we have another failed entrepreneur.
+
+    Only the first is catchable. The second is a reminder of how narrow this
+    has to stay: there is no rule that catches it without also catching real
+    speech, so it is left alone.
+    """
+    return bool(_OUTRO_OPENER.match(stripped) or _OUTRO_ANYWHERE.search(stripped))
 
 # Whisper's greatest hits when handed silence or noise. Only applied to short
 # clips, where a genuine utterance of this text is implausible.
@@ -46,7 +111,6 @@ class Transcript:
     latency_s: float = 0.0
     avg_logprob: float = 0.0
     no_speech_prob: float = 0.0
-    low_confidence_words: tuple[str, ...] = ()
     rejected_reason: str = ""
 
     @property
@@ -74,7 +138,6 @@ class WhisperConfig:
     short_clip_s: float = 3.0
     min_duration_s: float = 0.35
     min_rms: float = 0.003
-    word_confidence_floor: float = 0.55
     # The model's own confidence, which was being measured and then ignored.
     # An always-on assistant hands Whisper near-silence all day, and it answers
     # with fluent invented English rather than with nothing.
@@ -162,17 +225,40 @@ class Listener:
         self.resolved_model = ""
         self.resolved_device = ""
         self.resolved_compute = ""
-        # Surfaced by --check and the dashboard: a silent assistant with a
-        # rising failure count is a very different bug from a deaf one.
+        # Set to "cpu" once the gpu has failed, and never unset. Without it a
+        # card that dies mid session is retried on every single utterance,
+        # because `load()` reads the config afresh each time and the config
+        # still says `auto`.
+        self._forced_device: str | None = None
+        self._load_lock = threading.Lock()
+        # Counted here, read by nothing yet. The comment used to say it was
+        # surfaced by --check and the dashboard, and it is not: --check builds
+        # its own Listener, which has by definition never failed. The count is
+        # still the right thing to keep, because a silent assistant with a
+        # rising failure count is a very different bug from a deaf one, but
+        # whoever wires it up should not find a comment claiming it is done.
         self.failures = 0
 
     # --- model --------------------------------------------------------------
 
     def load(self) -> None:
+        """Build the model if it is not built. Safe to call from any thread.
+
+        The lock is what lets this be warmed in the background while the
+        microphone is already open. Without it the warming thread and the first
+        utterance can both find `_model` unset and both build one, and two
+        copies of small.en is how a card with room for one runs out of memory a
+        second after starting up.
+        """
         if self._model is not None:
             return
+        with self._load_lock:
+            if self._model is not None:  # somebody built it while we waited
+                return
+            self._load_unlocked()
 
-        device = self.config.device
+    def _load_unlocked(self) -> None:
+        device = self._forced_device or self.config.device
         if device == "auto":
             device = "cuda" if accel.device_count() else "cpu"
         if device == "cuda":
@@ -209,10 +295,20 @@ class Listener:
         hint = accel.missing_runtime_hint()
         if hint:
             self._log(f"whisper: {hint}")
+        # Let go of the broken cuda model before asking for a second one. It is
+        # holding host memory as well as card memory, and the machine may
+        # already be out of both, which is how a fallback ends up failing too.
+        self._release()
+        self._forced_device = "cpu"
         # Always the cpu's own best type, never the configured one. Whatever
         # `compute` was, it was chosen for the device that just failed, and
         # float16 on a processor does not load.
         self._build("cpu", accel.best_compute_type("cpu"))
+
+    def _release(self) -> None:
+        """Drop the loaded model and its memory before building another one."""
+        self._model = None
+        gc.collect()
 
     def _build(self, device: str, compute: str) -> None:
         """Construct the model on one device and record what actually happened."""
@@ -237,15 +333,38 @@ class Listener:
         """Move to the CPU after the GPU failed mid session. True if it moved.
 
         A driver reset or a card taken by something else should cost one
-        utterance, not the rest of the day. Only ever called when the current
-        device is cuda, so it cannot loop.
+        utterance, not the rest of the day. That promise is kept by
+        `_forced_device` rather than by `resolved_device`: a build that raises
+        never reaches the line that records the device it was building for, so
+        after a failed rebuild `resolved_device` still says "cuda" and the old
+        guard sent us around the same failing loop on every later utterance.
+
+        Releasing the dead model first matters as much as the flag. This is
+        called after the card refused to work, which on a real machine has
+        meant out of memory, and asking for a second model while the first is
+        still held is how the cpu rebuild ran out of memory too.
         """
-        if self.resolved_device != "cuda":
-            return False
-        self._log(f"whisper gpu failed ({reason}), moving to cpu for this session")
+        # The same lock `load()` takes, for the same reason: this releases a
+        # model and builds another, and two threads doing that at once is the
+        # out-of-memory this whole method exists to recover from. Only one
+        # thread reaches here today, but `load()`'s docstring promises any
+        # thread may call it, and an invariant held by luck is not held.
+        with self._load_lock:
+            if self._forced_device == "cpu":
+                return False  # already on the cpu; there is nowhere left to go
+            self._log(f"whisper gpu failed ({reason}), moving to cpu for this session")
+            self._forced_device = "cpu"
+            self._release()
+            return self._build_cpu_fallback()
+
+    def _build_cpu_fallback(self) -> bool:
+        """Build the cpu replacement. Caller holds `_load_lock`."""
         try:
             self._build("cpu", accel.best_compute_type("cpu"))
-        except Exception as exc:  # nothing left to fall back to
+        except Exception as exc:
+            # Not fatal and not permanent. `_forced_device` keeps the card out
+            # of it from here on, and the model is unset, so the next utterance
+            # retries the cpu on its own. Transient pressure recovers by itself.
             self._log(f"whisper cpu reload failed: {type(exc).__name__}: {exc}")
             return False
         return True
@@ -270,14 +389,20 @@ class Listener:
         pieces: list[str] = []
         logprobs: list[float] = []
         no_speech: list[float] = []
-        weak_words: list[str] = []
         try:
             segments, info = self._model.transcribe(
                 audio,
                 language=self.config.language,
                 beam_size=beam,
                 vad_filter=True,
-                word_timestamps=True,
+                # word_timestamps is deliberately absent. It makes
+                # faster-whisper run a second alignment pass over every
+                # segment, and the only thing that pass produced here was
+                # `low_confidence_words`, which nothing in the package or in
+                # scripts/ ever read. Measured on small.en over the four wav
+                # fixtures, 7 passes each: 344ms to 320ms on the gpu, and
+                # 1529ms to 1415ms on the cpu. Seven percent of the decode, on
+                # the one thing that sits directly between you and an answer.
                 # Without this, one bad transcription poisons every later one.
                 condition_on_previous_text=False,
                 initial_prompt=self.config.initial_prompt,
@@ -290,9 +415,6 @@ class Listener:
                 pieces.append(segment.text)
                 logprobs.append(getattr(segment, "avg_logprob", 0.0) or 0.0)
                 no_speech.append(getattr(segment, "no_speech_prob", 0.0) or 0.0)
-                for word in getattr(segment, "words", None) or []:
-                    if (word.probability or 1.0) < self.config.word_confidence_floor:
-                        weak_words.append(word.word.strip())
         except Exception as exc:
             # Never let this reach the audio loop. An assistant started at login
             # has no console, so an exception here is not a traceback anyone
@@ -317,7 +439,6 @@ class Listener:
             latency_s=time.monotonic() - started,
             avg_logprob=float(np.mean(logprobs)) if logprobs else 0.0,
             no_speech_prob=float(np.mean(no_speech)) if no_speech else 0.0,
-            low_confidence_words=tuple(weak_words),
         )
 
         reason = self._post_gate(transcript)
@@ -375,6 +496,12 @@ class Listener:
         # Stock filler, only on short clips. On a long one "thank you" is
         # probably a real thing somebody said.
         if transcript.duration_s < 2.0 and stripped in HALLUCINATIONS:
+            return "hallucination"
+
+        # The end of a video, at any length. No duration rule here, because
+        # that is exactly what let the log's example through: it runs to eleven
+        # words. See `_is_video_outro` for how narrow this has to be.
+        if _is_video_outro(stripped):
             return "hallucination"
         return ""
 

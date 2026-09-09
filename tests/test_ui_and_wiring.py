@@ -222,6 +222,34 @@ def test_starting_twice_opens_one_stream(fake_sounddevice):
     mic.stop()
 
 
+def test_an_overflow_is_counted_and_never_reported_from_the_callback():
+    """PortAudio gives the callback about one block, 30ms, and no more.
+
+    `on_error` was wired to `ui.warn`, which renders through rich and appends
+    to var/vesper.log. Doing that inside the callback is what made the callback
+    late, and a late callback is the definition of the overflow it was
+    reporting. The log showed them arriving in bursts of three to nine inside
+    the same second, each one causing the next.
+    """
+    told = []
+    mic = Microphone(on_error=told.append)
+    block = np.zeros((BLOCK_FRAMES, 1), dtype=np.float32)
+
+    for _ in range(9):
+        mic._callback(block, BLOCK_FRAMES, None, "input overflow")
+
+    assert told == [], "the callback must not do any reporting of its own"
+    assert mic.take_overflows() == 9
+    assert mic.take_overflows() == 0, "the count is handed over, not copied"
+
+
+def test_audio_still_arrives_while_overflows_are_happening():
+    """The count must not cost the block it was counting."""
+    mic = Microphone()
+    mic._callback(np.full((BLOCK_FRAMES, 1), 0.5, np.float32), BLOCK_FRAMES, None, "x")
+    assert mic.read(timeout=0.1) is not None
+
+
 def test_context_manager_starts_and_stops(fake_sounddevice):
     with Microphone() as mic:
         assert mic.running
@@ -273,11 +301,17 @@ def test_a_full_queue_drops_old_audio_instead_of_blocking(fake_sounddevice):
     assert mic.read(timeout=0.1) is not None
 
 
-def test_callback_status_is_reported_not_raised(fake_sounddevice):
+def test_callback_status_is_counted_not_raised(fake_sounddevice):
+    """It used to be reported through `on_error` from inside the callback.
+
+    Not raising was always the point of this test and still is. Where it goes
+    has changed: a count here, a sentence from the loop that reads the blocks.
+    """
     errors = []
     mic = Microphone(on_error=errors.append)
     mic._callback(np.zeros((BLOCK_FRAMES, 1), dtype=np.float32), 0, None, "overflow")
-    assert len(errors) == 1
+    assert errors == []
+    assert mic.take_overflows() == 1
 
 
 def test_device_listing_returns_only_inputs(fake_sounddevice):
@@ -404,7 +438,7 @@ def test_devices_flag_lists_microphones(capsys):
 def test_no_voice_flag_silences_the_assistant(monkeypatch):
     seen = {}
 
-    def fake_run_text(cfg, one_shot=""):
+    def fake_run_text(cfg, one_shot="", *, verbose=False):
         seen["engine"] = cfg.voice.engine
         return 0
 

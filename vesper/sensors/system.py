@@ -108,15 +108,3 @@ def _is_windows() -> bool:
     import sys
 
     return sys.platform == "win32"
-
-
-def prime() -> None:
-    """Take a throwaway CPU sample so the first real reading is not zero."""
-    try:
-        import psutil
-
-        psutil.cpu_percent(interval=None)
-        for process in psutil.process_iter(["cpu_percent"]):
-            pass
-    except Exception:
-        pass

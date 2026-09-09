@@ -204,6 +204,15 @@ class ElevenTTS:
         except ElevenError as exc:
             self._fall_back(text, stop, exc.reason)
         except Exception as exc:
+            # Being told to stop is not a failure. `Speaker.close` sets the
+            # stop event and then closes this voice, and the http client is
+            # shared across sentences now, so closing it lands as an exception
+            # in whichever read was still running. That is the shutdown
+            # working, and reporting it as "elevenlabs failed, using piper" is
+            # both untrue and the last thing written to the log before the
+            # process ends. A barge-in reaches here the same way.
+            if stop.is_set():
+                return
             # Deliberately broad. `Speaker._run` would catch this and route it
             # to on_error, so the process survives either way, but the sentence
             # would be silently dropped rather than spoken. Anything at all
@@ -236,6 +245,13 @@ class ElevenTTS:
                 self._lock.release()
         try:
             self.fallback.close()
+        except Exception:
+            pass
+        # The http client is kept open between sentences now, so something has
+        # to shut it. Last, and guarded, for the same reason as the fallback:
+        # nothing in shutdown may end up waiting on the network.
+        try:
+            self.client.close()
         except Exception:
             pass
 

@@ -183,6 +183,7 @@ class FakeMic:
         self.started = False
         self.stopped = False
         self.drained = 0
+        self.overflows = 0
 
     def start(self):
         self.started = True
@@ -198,6 +199,10 @@ class FakeMic:
 
     def drain(self):
         self.drained += 1
+
+    def take_overflows(self) -> int:
+        count, self.overflows = self.overflows, 0
+        return count
 
 
 class RecordingUI:

@@ -32,6 +32,7 @@ carrying a short reason, and the caller falls back to Piper.
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 
 BASE = "https://api.elevenlabs.io/v1"
@@ -165,19 +166,44 @@ class ElevenClient:
         # Only tests pass this. httpx.MockTransport keeps the suite off the
         # network, which is a rule this repo already holds everywhere else.
         self._transport = transport
+        self._shared_client = None
+        self._client_lock = threading.Lock()
 
     @property
     def configured(self) -> bool:
         return bool(self.api_key)
 
     def _client(self):
+        """One client for the life of this object, so the connection is kept.
+
+        There used to be a fresh `httpx.Client` per call, and `stream_pcm` is
+        called once per *sentence*, because Vesper starts speaking before the
+        turn has finished. A three sentence answer therefore meant three DNS
+        lookups, three TCP handshakes and three TLS handshakes to the same
+        host, in front of somebody waiting to hear the first word.
+
+        Callers must not close it. `close()` does that, once.
+        """
         import httpx  # late: heavy, and the rest of Vesper never needs it
 
-        return httpx.Client(
-            timeout=self.timeout_s,
-            headers={"xi-api-key": self.api_key},
-            transport=self._transport,
-        )
+        with self._client_lock:
+            if self._shared_client is None:
+                self._shared_client = httpx.Client(
+                    timeout=self.timeout_s,
+                    headers={"xi-api-key": self.api_key},
+                    transport=self._transport,
+                )
+            return self._shared_client
+
+    def close(self) -> None:
+        """Let go of the connection. Safe to call more than once."""
+        with self._client_lock:
+            client, self._shared_client = self._shared_client, None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # pragma: no cover - nothing useful left to do
+                pass
 
     # --- speech -------------------------------------------------------------
 
@@ -190,18 +216,18 @@ class ElevenClient:
 
         url = f"{self.base}/text-to-speech/{voice_id}/stream"
         try:
-            with self._client() as client:
-                with client.stream(
-                    "POST",
-                    url,
-                    params={"output_format": OUTPUT_FORMAT},
-                    json={"text": text, "model_id": model_id},
-                ) as response:
-                    if response.status_code != 200:
-                        raise classify(response.status_code, response.read())
-                    for chunk in response.iter_bytes():
-                        if chunk:
-                            yield chunk
+            client = self._client()
+            with client.stream(
+                "POST",
+                url,
+                params={"output_format": OUTPUT_FORMAT},
+                json={"text": text, "model_id": model_id},
+            ) as response:
+                if response.status_code != 200:
+                    raise classify(response.status_code, response.read())
+                for chunk in response.iter_bytes():
+                    if chunk:
+                        yield chunk
         except ElevenError:
             raise
         except httpx.TimeoutException:
@@ -225,8 +251,8 @@ class ElevenClient:
         import httpx
 
         try:
-            with self._client() as client:
-                response = client.get(f"{self.base}/voices", params={"page_size": 100})
+            client = self._client()
+            response = client.get(f"{self.base}/voices", params={"page_size": 100})
             if response.status_code != 200:
                 return KNOWN_VOICES
             payload = response.json()
@@ -270,16 +296,16 @@ class ElevenClient:
         import httpx
 
         try:
-            with self._client() as client:
-                response = client.post(
-                    f"{self.base}/text-to-voice/design",
-                    json={
-                        "voice_description": description,
-                        "model_id": "eleven_ttv_v3",
-                        "output_format": OUTPUT_FORMAT,
-                        "text": sample_text,
-                    },
-                )
+            client = self._client()
+            response = client.post(
+                f"{self.base}/text-to-voice/design",
+                json={
+                    "voice_description": description,
+                    "model_id": "eleven_ttv_v3",
+                    "output_format": OUTPUT_FORMAT,
+                    "text": sample_text,
+                },
+            )
             if response.status_code != 200:
                 raise classify(response.status_code, response.content)
             payload = response.json()
@@ -299,15 +325,15 @@ class ElevenClient:
         import httpx
 
         try:
-            with self._client() as client:
-                response = client.post(
-                    f"{self.base}/text-to-voice/create",
-                    json={
-                        "voice_name": name,
-                        "voice_description": description,
-                        "generated_voice_id": generated_voice_id,
-                    },
-                )
+            client = self._client()
+            response = client.post(
+                f"{self.base}/text-to-voice/create",
+                json={
+                    "voice_name": name,
+                    "voice_description": description,
+                    "generated_voice_id": generated_voice_id,
+                },
+            )
             if response.status_code not in (200, 201):
                 raise classify(response.status_code, response.content)
             return str(response.json().get("voice_id") or "")

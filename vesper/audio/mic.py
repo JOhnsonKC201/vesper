@@ -58,6 +58,17 @@ class Microphone:
         self._stream = None
         self._running = False
 
+        # Overflow reporting is counted here and said out there. PortAudio
+        # calls `_callback` on a real-time thread with a deadline of one block,
+        # 30ms, and the old code called `on_error` straight from it, which on
+        # this machine meant a Rich console render plus an append to
+        # var/vesper.log. That is far too slow to run inside the callback, and
+        # being slow inside the callback is precisely what causes the next
+        # overflow: the log showed them arriving in bursts of three to nine
+        # inside the same second, each one feeding the next.
+        self._overflows = 0
+        self._overflow_lock = threading.Lock()
+
     # --- lifecycle ----------------------------------------------------------
 
     @property
@@ -112,7 +123,9 @@ class Microphone:
 
     def _callback(self, indata, frames, time_info, status) -> None:
         if status:
-            self._on_error(RuntimeError(f"audio input status: {status}"))
+            # Counted, never reported from in here. See __init__.
+            with self._overflow_lock:
+                self._overflows += 1
         block = indata.copy().reshape(-1).astype(np.float32)
         with self._preroll_lock:
             self._preroll.append(block)
@@ -133,6 +146,18 @@ class Microphone:
             return self._blocks.get(timeout=timeout)
         except queue.Empty:
             return None
+
+    def take_overflows(self) -> int:
+        """How many blocks PortAudio dropped since this was last asked.
+
+        For the caller to report on its own thread. Returning a count rather
+        than a line of text is the point: overflows come in bursts, and one
+        sentence a minute saying it happened nine times is both more honest and
+        immeasurably cheaper than nine lines written from the audio thread.
+        """
+        with self._overflow_lock:
+            count, self._overflows = self._overflows, 0
+        return count
 
     def preroll(self) -> np.ndarray:
         """The last few hundred milliseconds, so we do not clip the first word."""

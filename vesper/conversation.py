@@ -76,6 +76,11 @@ _WORDS = re.compile(r"[a-z']+")
 # says the same complaint after each thing you say is unbearable.
 AUTH_NAG_S = 300.0
 
+# How often to mention that the microphone dropped audio. Overflows arrive in
+# bursts, so this is one summary on a timer rather than a line per occurrence,
+# and the counting happens in the audio callback where nothing else may.
+OVERFLOW_REPORT_S = 60.0
+
 # Handled locally, never sent to Claude. Telling something to be quiet should
 # not require a network round trip, and must work while it is mid-sentence.
 _MUTE_PHRASES = (
@@ -189,6 +194,12 @@ class ConversationConfig:
     # Where copies of changed files are kept, so "undo that" can put them back.
     # None disables it, which makes every approved change permanent.
     undo_dir: Path | None = None
+    # Mirrors runtime.log_transcripts. The audit log has one line that quotes
+    # what was said, `_run_with_hands`, and somebody who turned transcripts off
+    # would reasonably expect that to cover every file, not just the diagnostic
+    # one. Being surprised by a second file with your words in it is worse than
+    # being surprised by the first.
+    log_transcripts: bool = True
 
 
 class Conversation:
@@ -233,6 +244,31 @@ class Conversation:
         self._transcript: collections.deque[tuple[str, str]] = collections.deque(maxlen=40)
         self._speaking_since = 0.0
         self._barge_run = 0
+        self._overflows_said_at = 0.0
+        # Model loads started by `start()` and joined, briefly, by `stop()`, so
+        # that start and stop can be cycled inside one process without a warm
+        # thread from the last generation still writing into this one.
+        self._warming: list[threading.Thread] = []
+        # Both deques above are written by whichever thread is speaking, and
+        # the proactive loop speaks from its own. They are read by two others:
+        # the audio loop in `_is_own_voice`, and the dashboard in
+        # `transcript()`. Both have a maxlen, so an append also pops, and
+        # popping while another thread iterates raises "deque mutated during
+        # iteration".
+        #
+        # Honest about what this is: hardening, not a fix for anything seen.
+        # The bare pattern does race, in about three seconds with three
+        # writers, but it could not be provoked through either real function
+        # even with sys.setswitchinterval at a microsecond. `transcript()` is
+        # safe because CPython builds a tuple from a deque in one C call that
+        # never yields, and `_is_own_voice` spends nearly all of its time in
+        # regex and set work rather than in the loop itself.
+        #
+        # It is kept because both of those are implementation details rather
+        # than promises, the second one is luck, and the first is precisely
+        # what a free threaded build removes. The cost is a lock taken a few
+        # times a turn.
+        self._said_lock = threading.Lock()
         self.turns = 0
         self.interruptions = 0
         self.echo_rejections = 0
@@ -309,17 +345,58 @@ class Conversation:
     # --- lifecycle ----------------------------------------------------------
 
     def start(self) -> None:
-        sensors.take()  # prime psutil counters
-        self.stt.load()
-        if self.voiceprint is not None and self.voiceprint.enrolled:
-            voiceprint.warm()
-        self.start_brain()
-        # The microphone runs either way: a Vesper that cannot hear can never
-        # notice that the login has come back.
+        # The microphone first, and before anything slow. Everything below it
+        # is a model being built, and Vesper was deaf for all of it: measured
+        # one piece at a time on this machine, 4.5s warm, and the log has a
+        # cold start where whisper alone took 7.4s. Startup is also the moment
+        # you are most likely to say something, having just started it.
+        #
+        # It runs whatever else happens, including a dead login: a Vesper that
+        # cannot hear can never notice the login has come back.
         self.mic.start()
+
+        sensors.take()  # prime psutil counters, 20ms
+
+        # Independent of each other and of the brain, so they warm behind the
+        # microphone rather than in front of it. Nothing waits on them here.
+        # `Listener.load` takes a lock and is idempotent, so the first
+        # utterance either finds the model ready or waits for the same build
+        # rather than starting a second one.
+        self._warming = [
+            self._warm("whisper", self.stt.load),
+            self._warm("voiceprint", self._warm_voiceprint),
+        ]
+
+        # Not backgrounded. It decides `_locked_out`, which decides whether the
+        # greeting below is a lie.
+        self.start_brain()
+
         self._running.set()
         if self.config.greet_on_start and not self._locked_out:
             self.speaker.say(f"{self.config.name} here. I'm listening.")
+
+    def _warm(self, what: str, load) -> threading.Thread:
+        """Build one model on its own thread, reporting rather than raising."""
+
+        def run() -> None:
+            started = time.monotonic()
+            try:
+                load()
+            except Exception as exc:
+                # Not fatal here. Whatever needs this model will try to load it
+                # again and fail in front of the person who asked, which is a
+                # better place to be told than a log line at startup.
+                self.ui.warn(f"{what} did not warm up, {type(exc).__name__}: {exc}")
+                return
+            self.ui.info(f"{what} ready in {time.monotonic() - started:.2f}s")
+
+        thread = threading.Thread(target=run, daemon=True, name=f"warm-{what}")
+        thread.start()
+        return thread
+
+    def _warm_voiceprint(self) -> None:
+        if self.voiceprint is not None and self.voiceprint.enrolled:
+            voiceprint.warm()
 
     def start_brain(self) -> None:
         """Spawn the brain, unless the CLI says it is not logged in.
@@ -345,6 +422,18 @@ class Conversation:
         self.mic.stop()
         self.speaker.close()
         self.brain.stop()
+        # The warm threads, last and briefly. They are daemons, so process exit
+        # reaps them either way and this changes nothing about shutting down;
+        # what it does is make start() and stop() safe to cycle inside one
+        # process, which the dashboard and the tests both do. Without it a warm
+        # thread from the previous generation is still building a model into
+        # `self.stt` after the next one has begun.
+        #
+        # A bounded wait, like `Speaker.close`, and for the same reason:
+        # shutting down must not sit behind a model load.
+        for thread in self._warming:
+            thread.join(timeout=2.0)
+        self._warming = []
 
     def transcript(self) -> tuple[tuple[str, str], ...]:
         """The conversation so far, oldest first, as ("you"|"vasper", text).
@@ -352,8 +441,12 @@ class Conversation:
         A fresh tuple every call, not the deque. The dashboard thread reads
         this while the audio loop is appending to it, and handing out the live
         object would be handing out a race.
+
+        Building the tuple is itself an iteration, so it is taken under the
+        lock. Without it the copy was as exposed as the deque would have been.
         """
-        return tuple(self._transcript)
+        with self._said_lock:
+            return tuple(self._transcript)
 
     @property
     def locked_out(self) -> bool:
@@ -450,6 +543,7 @@ class Conversation:
         try:
             while self._running.is_set():
                 block = self.mic.read(timeout=0.5)
+                self._report_overflows()
                 if block is None:
                     continue
                 try:
@@ -476,6 +570,24 @@ class Conversation:
             pass
         finally:
             self.stop()
+
+    def _report_overflows(self) -> None:
+        """Say, at most once a minute, that the microphone dropped audio.
+
+        Counted in the PortAudio callback and reported from here, because
+        writing to the log inside that callback is what caused the overflows to
+        arrive in bursts in the first place: the report made the callback slow,
+        and a slow callback is the definition of an overflow.
+        """
+        now = time.monotonic()
+        if now - self._overflows_said_at < OVERFLOW_REPORT_S:
+            return
+        dropped = self.mic.take_overflows()
+        self._overflows_said_at = now
+        if dropped:
+            self.ui.warn(
+                f"the microphone dropped audio {dropped} times in the last minute"
+            )
 
     def _handle_block(self, block: np.ndarray) -> None:
         # Before the pause check, because a window left open when you paused
@@ -620,7 +732,7 @@ class Conversation:
             # Only what was addressed to it. Everything said in the room goes
             # past the microphone, and a transcript of the room is a different
             # and much more intrusive thing than a record of the conversation.
-            self._transcript.append(("you", transcript.text))
+            self._remember_heard(transcript.text)
         if not result.triggered:
             # Not addressed to Vesper, so a pending question stays pending and
             # unanswered. Both halves matter: a "yes" said to someone else in
@@ -732,14 +844,28 @@ class Conversation:
             return True
         return answer in (YES, QUALIFIED) and result.reason == "wake-word"
 
+    def _remember_heard(self, text: str) -> None:
+        """Record something the user said. Callable from any thread."""
+        with self._said_lock:
+            self._transcript.append(("you", text))
+
+    def _remember_said(self, line: str) -> None:
+        """Record something Vesper said. Callable from any thread, and is:
+        the proactive loop speaks from its own."""
+        with self._said_lock:
+            self._spoken_recently.append(line)
+            self._transcript.append(("vasper", line))
+
     def _is_own_voice(self, text: str) -> bool:
         """Did the mic pick up Vesper's own speech coming out of the speakers?"""
-        if not self._spoken_recently:
-            return False
         heard = set(_WORDS.findall(text.lower()))
         if len(heard) < 2:
             return False
-        for line in self._spoken_recently:
+        # Snapshotted rather than iterated. The proactive loop speaks from its
+        # own thread, and an append here pops the oldest, which is a mutation.
+        with self._said_lock:
+            recent = list(self._spoken_recently)
+        for line in recent:
             said = set(_WORDS.findall(line.lower()))
             if not said:
                 continue
@@ -782,8 +908,7 @@ class Conversation:
         line = clean_for_speech(line)
         if not line:
             return
-        self._spoken_recently.append(line)
-        self._transcript.append(("vasper", line))
+        self._remember_said(line)
         if not self.speaker.speaking:
             self._speaking_since = time.monotonic()
         self.speaker.say(line)
@@ -1187,7 +1312,7 @@ class Conversation:
         # Typed, so it came from someone with the keyboard. That is a stronger
         # identity check than any voiceprint.
         self._voice_confirmed = True
-        self._transcript.append(("you", text))
+        self._remember_heard(text)
         if self._consent_is_live():
             if self._settle_consent(text, echo=False):
                 return
@@ -1241,9 +1366,17 @@ class Conversation:
         any other grant. Everything Vesper thinks of on its own still asks.
         """
         self.approvals += 1
-        self.ui.decision(audit.ASKED_FOR, f"hands: {text[:200]}")
+        # The one decision line that quotes what was said. Every other one
+        # describes the tool action instead, through `request.written()`, and
+        # this is the outlier only because there is no ActionRequest yet: the
+        # request is the sentence, since a sentence that asks for the hands
+        # approves itself. With transcripts off it is recorded the same way
+        # logfile.py records a heard line, which keeps the fact and the shape
+        # and drops the words.
+        said = text[:200] if self.config.log_transcripts else f"[{len(text)} chars]"
+        self.ui.decision(audit.ASKED_FOR, f"hands: {said}")
         if self.config.audit_log is not None:
-            audit.record(self.config.audit_log, audit.ASKED_FOR, f"hands: {text[:200]}")
+            audit.record(self.config.audit_log, audit.ASKED_FOR, f"hands: {said}")
         self.brain.grant(HAND_SPECS)
         try:
             self._run_turn(HANDS_ASKED_NOTE + "\n\n" + payload)
@@ -1349,6 +1482,31 @@ class Conversation:
         # mark he is waiting on an answer, and the window is held open for it.
         last_spoken = ""
 
+        def say_sentence(sentence: str) -> None:
+            """Speak one sentence of the answer, and remember that we did.
+
+            This was written out three times below, once for the streaming
+            deltas, once for the tail the router had buffered, and once for
+            whatever the assembler was still holding. All three had to agree
+            about the refusal check and about which locals to update, and one
+            of them did not: the middle copy never set `spoke_at`, so a turn
+            whose only speech arrived in the tail reported no first speech time
+            at all. That is a number in the register rather than anything the
+            user hears, but it was wrong, and it was wrong because the rule
+            lived in three places.
+            """
+            nonlocal spoke_at, spoken_anything, last_spoken
+            # Once something has been refused this turn, anything that only
+            # restates the refusal is dropped: the question about to be asked
+            # says it better, and says it correctly.
+            if requests and is_refusal_noise(sentence):
+                return
+            if spoke_at is None:
+                spoke_at = time.monotonic()
+            spoken_anything = True
+            last_spoken = sentence
+            self._say(sentence)
+
         requests: list[ActionRequest] = []
         seen: set[str] = set()
         # Tool calls that ran on this grant without being the thing it was
@@ -1371,16 +1529,7 @@ class Conversation:
                     self.ui.screen(screen_buffer.strip())
                     screen_buffer = ""
                 for sentence in assembler.feed(spoken_delta):
-                    # Once something has been refused this turn, anything that
-                    # only restates the refusal is dropped: the question about
-                    # to be asked says it better, and says it correctly.
-                    if requests and is_refusal_noise(sentence):
-                        continue
-                    if spoke_at is None:
-                        spoke_at = time.monotonic()
-                    spoken_anything = True
-                    last_spoken = sentence
-                    self._say(sentence)
+                    say_sentence(sentence)
 
             elif isinstance(event, ToolStarted):
                 self.ui.tool(event.name, event.detail)
@@ -1415,9 +1564,12 @@ class Conversation:
                     requests.append(request)
 
             elif isinstance(event, BrainError):
+                # The detail is logged and the plain sentence is spoken. They
+                # used to be the same string, so "could not reach the brain:
+                # [WinError 232] The pipe is being closed" was read out loud.
                 self.register.note_failure()
                 self.ui.error(event.message)
-                self._say(event.message)
+                self._say(failures.spoken_break(event.message))
                 return
 
             elif isinstance(event, TurnComplete):
@@ -1429,21 +1581,13 @@ class Conversation:
 
                 spoken_tail, screen_tail = router.flush()
                 for sentence in assembler.feed(spoken_tail):
-                    if requests and is_refusal_noise(sentence):
-                        continue
-                    spoken_anything = True
-                    last_spoken = sentence
-                    self._say(sentence)
+                    say_sentence(sentence)
                 leftover = (screen_buffer + screen_tail).strip()
                 if leftover:
                     self.ui.screen(leftover)
                 tail = assembler.flush()
-                if tail and not (requests and is_refusal_noise(tail)):
-                    if spoke_at is None:
-                        spoke_at = time.monotonic()
-                    spoken_anything = True
-                    last_spoken = tail
-                    self._say(tail)
+                if tail:
+                    say_sentence(tail)
 
                 # Fallback for a turn that produced no streaming deltas at all.
                 # Partial messages can be absent, and silence would look like a

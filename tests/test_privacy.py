@@ -361,3 +361,121 @@ def test_context_block_stays_small():
     """It rides on every single turn, so size is a cost, not a detail."""
     block = sensors.context_block()
     assert len(block) < 400, f"context block is {len(block)} chars, too fat for every turn"
+
+
+# --- what gets written down -------------------------------------------------
+
+
+def test_the_log_can_be_told_not_to_keep_the_words(tmp_path):
+    """Everything the microphone hears is transcribed, addressed or not.
+
+    One week of a real var/vesper.log holds 975 transcriptions and 238 of them
+    were for Vesper. The rest is a record of a room: other people, a
+    television, half of a phone call. sensors/window.py already redacts a
+    sensitive window title and there was no equivalent for what was said.
+    """
+    from vesper.logfile import LogFile, attach
+
+    class UI:
+        def __init__(self):
+            self.seen = []
+
+        def heard(self, text, addressed):
+            self.seen.append((text, addressed))
+
+        def info(self, message): pass
+        def warn(self, message): pass
+        def error(self, message): pass
+        def discarded(self, reason): pass
+
+    path = tmp_path / "quiet.log"
+    ui = UI()
+    attach(ui, LogFile(path), transcripts=False)
+    ui.heard("my card number is four one one one", False)
+    ui.heard("Vesper what time is it", True)
+
+    written = path.read_text(encoding="utf-8")
+    assert "card number" not in written
+    assert "four one one one" not in written
+    assert "what time is it" not in written
+    # But that something was heard, and who for, is still answerable.
+    assert "->" in written and written.count("chars") == 2
+    # And the terminal is untouched, which is the point of wrapping rather
+    # than editing the UI.
+    assert ui.seen == [
+        ("my card number is four one one one", False),
+        ("Vesper what time is it", True),
+    ]
+
+
+def test_transcripts_are_kept_by_default(tmp_path):
+    """It is the only thing that answers "I said the wake word and nothing
+    happened", so the default must not change."""
+    from vesper.config import RuntimeSettings
+    from vesper.logfile import LogFile, attach
+
+    assert RuntimeSettings().log_transcripts is True
+
+    class UI:
+        def heard(self, text, addressed): pass
+        def info(self, message): pass
+        def warn(self, message): pass
+        def error(self, message): pass
+        def discarded(self, reason): pass
+
+    path = tmp_path / "loud.log"
+    ui = UI()
+    attach(ui, LogFile(path))
+    ui.heard("Vesper what time is it", True)
+    assert "what time is it" in path.read_text(encoding="utf-8")
+
+
+def test_turning_transcripts_off_covers_the_audit_log_too(tmp_path):
+    """A second file with your words in it is worse than the first.
+
+    Every other decision line describes the tool action, through
+    `request.written()`. `ASKED_FOR` is the outlier, and only because there is
+    no ActionRequest yet: an utterance that asks for the hands approves itself,
+    so the request is the sentence. It was writing up to 200 characters of
+    speech to var/actions.log whatever `log_transcripts` said.
+    """
+    import numpy as np
+
+    from vesper.audio.speaker import Speaker
+    from vesper.conversation import Conversation, ConversationConfig
+    from vesper.wake import WakeConfig, WakeGate
+
+    from conftest import FakeBrain, FakeMic, FakeSTT, FakeVoice, RecordingUI
+
+    secret = "Vesper, click the button that says my bank password is Hunter2"
+    audit_log = tmp_path / "actions.log"
+
+    def run(*, log_transcripts: bool):
+        audit_log.unlink(missing_ok=True)
+        speaker = Speaker(FakeVoice(duration=0.0))
+        conv = Conversation(
+            brain=FakeBrain(["Done."]),
+            stt=FakeSTT([secret]),
+            speaker=speaker,
+            mic=FakeMic(),
+            wake=WakeGate(WakeConfig()),
+            config=ConversationConfig(
+                greet_on_start=False,
+                audit_log=audit_log,
+                log_transcripts=log_transcripts,
+            ),
+            ui=RecordingUI(),
+        )
+        conv._on_utterance(np.full(16000, 0.2, dtype=np.float32))
+        speaker.wait_until_idle(5.0)
+        speaker.close()
+        return audit_log.read_text(encoding="utf-8") if audit_log.exists() else ""
+
+    kept = run(log_transcripts=True)
+    assert "Hunter2" in kept, "the audit log should quote the request by default"
+
+    dropped = run(log_transcripts=False)
+    assert "Hunter2" not in dropped, "the words reached the audit log anyway"
+    assert "bank password" not in dropped
+    # The decision itself is still on the record, which is what an audit is for.
+    assert "asked for" in dropped.lower() or "hands" in dropped.lower(), dropped

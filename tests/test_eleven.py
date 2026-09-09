@@ -585,3 +585,63 @@ def test_clearing_the_choice_hands_control_back_to_config(tmp_path):
     voicechoice.save(path, "ABC123", "George")
     voicechoice.clear(path)
     assert not voicechoice.load(path).chosen
+
+
+# --- one connection, not one per sentence -----------------------------------
+
+
+def test_one_http_client_serves_every_sentence():
+    """`stream_pcm` is called once per sentence, not once per answer.
+
+    Vesper starts speaking before the turn has finished, so a three sentence
+    answer used to mean three DNS lookups, three TCP handshakes and three TLS
+    handshakes to the same host, in front of somebody waiting to hear the
+    first word.
+    """
+    import httpx
+
+    built = []
+    real = httpx.Client
+
+    def counting(*args, **kwargs):
+        built.append(1)
+        return real(*args, **kwargs)
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, content=b"\x00\x01" * 200)
+    )
+    client = ElevenClient("sk-test-key", transport=transport)
+    httpx.Client = counting
+    try:
+        for sentence in ("One.", "Two.", "Three."):
+            list(client.stream_pcm(sentence, "voice-id"))
+    finally:
+        httpx.Client = real
+
+    assert len(built) == 1, f"opened {len(built)} clients for three sentences"
+    client.close()
+
+
+def test_closing_twice_is_not_an_error():
+    import httpx
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b""))
+    client = ElevenClient("sk-test-key", transport=transport)
+    client._client()
+    client.close()
+    client.close()  # must not raise
+    assert client._shared_client is None
+
+
+def test_a_closed_client_can_still_be_used_again():
+    """`close` is called at shutdown, but nothing promises no later call."""
+    import httpx
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, content=b"\x00\x01" * 100)
+    )
+    client = ElevenClient("sk-test-key", transport=transport)
+    list(client.stream_pcm("One.", "voice-id"))
+    client.close()
+    assert list(client.stream_pcm("Two.", "voice-id")), "it did not come back"
+    client.close()

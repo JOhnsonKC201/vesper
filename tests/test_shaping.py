@@ -195,3 +195,48 @@ def test_every_preset_is_reachable_by_name():
     for name, character in shaping.PRESETS.items():
         assert preset(name) is character
         assert character.name == name
+
+
+def test_caching_the_gain_curve_does_not_change_the_sound():
+    """The curve is now built once per chunk size and reused.
+
+    It is shared between calls, so the first thing to check is that nothing
+    downstream can write to it, and the second is that the audio is identical
+    to what the uncached path produced.
+    """
+    import numpy as np
+
+    from vesper.tts import shaping as shaping_module
+
+    character = shaping_module.preset("warm")
+    rate = 22050
+    samples = np.random.default_rng(7).standard_normal(1024) * 0.1
+
+    shaping_module._curve.cache_clear()
+    once = shaping_module._apply_tone(samples, rate, character)
+    twice = shaping_module._apply_tone(samples, rate, character)
+    assert np.array_equal(once, twice), "a cached curve changed the audio"
+
+    # The same thing computed the long way round, as it was before.
+    freqs = np.fft.rfftfreq(samples.size, 1.0 / rate)
+    expected = np.fft.irfft(
+        np.fft.rfft(samples) * shaping_module._response(freqs, character),
+        n=samples.size,
+    )
+    assert np.array_equal(once, expected), "the cached curve is not the same curve"
+
+    info = shaping_module._curve.cache_info()
+    assert info.hits >= 1, f"the cache was never hit: {info}"
+
+    curve = shaping_module._curve(1024, rate, character)
+    with pytest.raises(ValueError):
+        curve[0] = 999.0  # shared between calls, so it must be read only
+
+
+def test_each_character_gets_its_own_curve():
+    from vesper.tts import shaping as shaping_module
+
+    shaping_module._curve.cache_clear()
+    warm = shaping_module._curve(512, 22050, shaping_module.preset("warm"))
+    jarvis = shaping_module._curve(512, 22050, shaping_module.preset("jarvis"))
+    assert not (warm == jarvis).all(), "two characters shared one curve"

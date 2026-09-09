@@ -5,6 +5,7 @@ to produces speech, whether interrupting it shuts it up, and whether it can tell
 its own voice from yours.
 """
 
+import threading
 import time
 
 import numpy as np
@@ -327,20 +328,49 @@ def test_half_duplex_ignores_the_microphone_while_speaking():
 
 
 def test_a_brain_error_is_spoken_rather_than_swallowed():
+    """Said plainly, logged in full.
+
+    The spoken line and the logged line used to be the same string, so an OS
+    error carrying a file path was read out loud in Vesper's voice. That is the
+    failure brain/failures.py already prevents for the CLI's own error text,
+    applied now to ours.
+    """
     from vesper.brain.protocol import BrainError
+
+    raw = "could not reach the brain: [WinError 232] C:/Vesper/vesper/brain"
 
     class FailingBrain(FakeBrain):
         def ask(self, text):
             self.asked.append(text)
-            yield BrainError("I lost my connection to Claude.")
+            yield BrainError(raw)
 
     conv, _, _, voice, speaker, ui = build(transcripts=["Vesper hello"])
     conv.brain = FailingBrain()
     conv._on_utterance(audio())
     settle(speaker)
     speaker.close()
-    assert voice.lines == ["I lost my connection to Claude."]
-    assert ui.errors == ["I lost my connection to Claude."]
+
+    assert voice.lines, "a brain error must still be spoken, not swallowed"
+    spoken = voice.lines[0]
+    assert "WinError" not in spoken and "C:/" not in spoken
+    assert spoken == "I lost my connection to Claude. Give me a moment and ask me again."
+    assert ui.errors == [raw], "the detail still belongs in the log"
+
+
+def test_a_timeout_already_reads_as_a_sentence_and_is_left_alone():
+    from vesper.brain.protocol import BrainError
+
+    class SlowBrain(FakeBrain):
+        def ask(self, text):
+            self.asked.append(text)
+            yield BrainError("that took too long, so I stopped waiting")
+
+    conv, _, _, voice, speaker, _ui = build(transcripts=["Vesper hello"])
+    conv.brain = SlowBrain()
+    conv._on_utterance(audio())
+    settle(speaker)
+    speaker.close()
+    assert voice.lines == ["that took too long, so I stopped waiting"]
 
 
 def test_permission_requests_reach_the_ui_and_are_asked_out_loud():
@@ -426,3 +456,209 @@ def test_one_bad_audio_block_does_not_end_the_assistant():
     assert conv.errors == 1
     assert any("handling audio failed" in message for message in ui.errors)
     assert conv.status()["errors"] == 1
+
+
+# --- dropped audio ----------------------------------------------------------
+
+
+def test_dropped_audio_is_reported_once_rather_than_per_block():
+    """The count is kept by the microphone and the sentence is said here.
+
+    Nine overflows inside a second is one problem, not nine, and the reporting
+    is what used to cause the next one.
+    """
+    conv, _brain, _stt, _voice, _speaker, ui = build()
+    conv.mic.overflows = 9
+
+    conv._report_overflows()  # arms the timer, says nothing yet
+    conv._overflows_said_at = 0.0
+    conv._report_overflows()
+
+    said = [line for line in ui.warnings if "dropped audio" in line]
+    assert len(said) == 1, f"expected one summary, got {ui.warnings}"
+    assert "9 times" in said[0]
+
+
+def test_a_quiet_microphone_says_nothing_at_all():
+    conv, _brain, _stt, _voice, _speaker, ui = build()
+    conv._overflows_said_at = 0.0
+    conv._report_overflows()
+    assert not [line for line in ui.warnings if "dropped audio" in line]
+
+
+def test_overflows_are_not_reported_more_than_once_a_minute():
+    conv, _brain, _stt, _voice, _speaker, ui = build()
+    conv._overflows_said_at = 0.0
+    conv.mic.overflows = 3
+    conv._report_overflows()
+    conv.mic.overflows = 4
+    conv._report_overflows()
+
+    said = [line for line in ui.warnings if "dropped audio" in line]
+    assert len(said) == 1
+    assert conv.mic.overflows == 4, "the second burst is still being counted up"
+
+
+# --- two threads, one deque -------------------------------------------------
+
+
+def test_the_echo_filter_survives_being_spoken_to_from_another_thread():
+    """`_is_own_voice` iterates `_spoken_recently`, which `_say` pops from.
+
+    The proactive loop speaks from its own thread, so the two really do run at
+    once, and `_spoken_recently` has a maxlen, so an append also pops.
+
+    A smoke test rather than a reproduction, and worth saying so. The bare
+    pattern does raise "deque mutated during iteration" in about three seconds
+    with three writers, but it could not be provoked through this function even
+    with sys.setswitchinterval at a microsecond, because nearly all of the time
+    here goes on regex and set work rather than on the loop. What this catches
+    is somebody removing the lock and something much more exposed taking its
+    place, which is the regression worth catching.
+    """
+    conv, _brain, _stt, _voice, speaker, _ui = build()
+    stop = threading.Event()
+    raced = []
+
+    def keep_saying():
+        count = 0
+        while not stop.is_set():
+            count += 1
+            conv._remember_said(f"the battery is at eighty percent, reading {count}")
+
+    def keep_checking():
+        while not stop.is_set():
+            try:
+                conv._is_own_voice("the battery is at eighty percent and charging")
+            except RuntimeError as exc:  # deque mutated during iteration
+                raced.append(str(exc))
+                return
+
+    writers = [threading.Thread(target=keep_saying, daemon=True) for _ in range(3)]
+    checker = threading.Thread(target=keep_checking, daemon=True)
+    for thread in writers:
+        thread.start()
+    checker.start()
+    time.sleep(3.0)
+    stop.set()
+    for thread in writers + [checker]:
+        thread.join(timeout=5)
+    speaker.close()
+
+    assert not raced, f"the echo filter raced the writer: {raced}"
+
+
+def test_the_transcript_can_be_read_while_it_is_being_written():
+    """The dashboard reads this on its own thread once a second.
+
+    `tuple(deque)` turns out to be safe on its own: CPython builds it in one C
+    call that never yields, and three writers for three seconds could not
+    disturb it. The lock is here anyway, because that is an implementation
+    detail rather than a promise, and it is exactly the promise a free threaded
+    build takes away. It costs a handful of microseconds once a second.
+    """
+    conv, _brain, _stt, _voice, speaker, _ui = build()
+    stop = threading.Event()
+    raced = []
+
+    def keep_saying():
+        count = 0
+        while not stop.is_set():
+            count += 1
+            conv._remember_said(f"line number {count}")
+            conv._remember_heard(f"and a reply to {count}")
+
+    def keep_reading():
+        while not stop.is_set():
+            try:
+                assert isinstance(conv.transcript(), tuple)
+            except RuntimeError as exc:
+                raced.append(str(exc))
+                return
+
+    writers = [threading.Thread(target=keep_saying, daemon=True) for _ in range(3)]
+    reader = threading.Thread(target=keep_reading, daemon=True)
+    for thread in writers:
+        thread.start()
+    reader.start()
+    time.sleep(1.5)
+    stop.set()
+    for thread in writers + [reader]:
+        thread.join(timeout=5)
+    speaker.close()
+
+    assert not raced, f"transcript() raced the writer: {raced}"
+
+
+# --- starting up ------------------------------------------------------------
+
+
+def test_the_microphone_opens_before_any_model_is_built():
+    """Vesper used to be deaf for the whole of startup.
+
+    Measured one piece at a time on this machine: 4.5s of model building warm,
+    and the log has a cold start where whisper alone took 7.4s. Startup is also
+    when you are most likely to say something, having just started it.
+    """
+    order = []
+
+    conv, _brain, stt, _voice, speaker, _ui = build()
+    conv.mic.start = lambda: order.append("mic")
+    stt.load = lambda: order.append("whisper")
+    conv.brain.auth_status = lambda: order.append("brain") or True
+
+    conv.start()
+    for thread in conv._warming:
+        thread.join(timeout=10)
+    conv._running.clear()
+    settle(speaker)
+    speaker.close()
+
+    assert order[0] == "mic", f"the microphone opened at position {order.index('mic')}"
+    assert "whisper" in order, "the model was never warmed"
+
+
+def test_a_model_that_will_not_warm_does_not_stop_him_starting():
+    """The person who asks for it should be told, not the log at startup."""
+    conv, _brain, stt, _voice, speaker, ui = build()
+
+    def refuse():
+        raise RuntimeError("out of memory")
+
+    stt.load = refuse
+    conv.start()
+    for thread in conv._warming:
+        thread.join(timeout=10)
+    conv._running.clear()
+    settle(speaker)
+    speaker.close()
+
+    assert conv.mic.started, "the microphone should be open regardless"
+    assert any("did not warm up" in w for w in ui.warnings), ui.warnings
+
+
+def test_the_first_utterance_never_builds_a_second_model():
+    """Two copies of small.en is how a card with room for one runs out.
+
+    The warming thread and the first utterance can both find the model unset,
+    so `load` takes a lock and checks again inside it.
+    """
+    from vesper.stt.whisper import Listener, WhisperConfig
+
+    stt = Listener(WhisperConfig(model="tiny.en", device="cpu"), log=lambda m: None)
+    builds = []
+    real = stt._load_unlocked
+
+    def counted():
+        builds.append(1)
+        time.sleep(0.05)  # widen the window the lock has to cover
+        real()
+
+    stt._load_unlocked = counted
+    threads = [threading.Thread(target=stt.load) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert len(builds) == 1, f"{len(builds)} models were built at once"

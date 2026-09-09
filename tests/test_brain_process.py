@@ -442,3 +442,122 @@ def test_auth_status_reads_the_exit_code(brain_factory):
 def test_auth_status_is_none_when_the_question_cannot_be_asked():
     brain = ClaudeBrain(BrainConfig(executable="C:/no/such/dir/claude-that-is-not-there.exe"))
     assert brain.auth_status() is None
+
+
+# --- a brain that is being replaced ------------------------------------------
+
+
+def test_a_pump_writes_only_to_the_queue_it_was_handed(brain_factory):
+    """The pumps used to write into whichever queue existed when they wrote.
+
+    `start()` replaces `self._events` and `self._parser`. The old pump was
+    still draining the dying child, and when it reached EOF its `finally` put a
+    sentinel into the *new* queue. The next `ask()` read it and answered "the
+    brain closed its output stream". Every grant and every revoke respawns, so
+    this landed on the turn immediately after a spoken yes.
+
+    The window is real but narrow, so this pins the invariant that closes it
+    rather than trying to lose the race on demand: a pump writes to what it was
+    handed and never to whatever the brain is holding by the time it writes.
+    The queue swap below is exactly what `grant()` does.
+    """
+    import io
+
+    from vesper.brain.claude import _SENTINEL
+
+    brain = brain_factory(replies=["Hello."])
+    collect(brain, "hi")
+    dying_events, dying_parser = brain._events, brain._parser
+
+    class DeadChild:
+        stdout = io.StringIO("")  # the child has gone; the pipe is at EOF
+        stderr = None
+
+    brain.stop()
+    brain.start()
+    live_events = brain._events
+    assert live_events is not dying_events, "start() should hand out a fresh queue"
+
+    # And only now does the pump left over from the old child get scheduled.
+    brain._pump_stdout(DeadChild(), dying_parser, dying_events)
+
+    assert dying_events.get_nowait() is _SENTINEL, "the sentinel went nowhere"
+    assert live_events.empty(), "the replaced brain wrote into the live brain's queue"
+
+
+def test_the_turn_after_a_grant_still_completes(brain_factory):
+    """The end to end version of the above, over several respawns."""
+    brain = brain_factory(replies=["One.", "Two.", "Three.", "Four.", "Five.", "Six."])
+    collect(brain, "hello")
+
+    for attempt in range(5):
+        brain.grant(("Write",))
+        events = collect(brain, "and now")
+        assert not of(events, BrainError), (
+            f"attempt {attempt}: the replaced brain failed the live one's turn, "
+            f"{[e.message for e in of(events, BrainError)]}"
+        )
+        assert of(events, TurnComplete), f"attempt {attempt}: no turn completed"
+        brain.revoke()
+
+
+def test_a_replaced_brain_cannot_end_the_next_turn_with_its_own_answer(brain_factory):
+    """The same race, with the other half of the damage.
+
+    A stale TurnComplete reaching the new queue ends the next turn early and is
+    counted again, so one question costs two turns and two lots of cost.
+
+    Counted rather than compared: the fake is a fresh process after the
+    respawn, so it starts its reply list over and the text alone cannot tell a
+    stale completion from an honest one.
+    """
+    brain = brain_factory(replies=["First answer.", "Second answer."])
+    collect(brain, "hello")
+    assert brain.turn_count == 1
+    brain.grant(("Write",))
+
+    done = of(collect(brain, "and now"), TurnComplete)
+    assert len(done) == 1, f"one question, {len(done)} completions"
+    assert brain.turn_count == 2, "a stale completion was counted as a turn of its own"
+
+
+def test_a_turn_that_times_out_takes_the_child_down_with_it(brain_factory):
+    """Giving up on an answer is not the same as the answer stopping.
+
+    Returning on the deadline left the child still generating into the queue
+    the next question would read, so the abandoned turn's backlog ended the
+    next turn the moment it was asked.
+    """
+    brain = brain_factory(replies=["Slow one.", "Quick one."], FAKE_CLAUDE_DELAY_MS=400)
+    brain.start()
+    first_pid = brain._process.pid
+    brain.config.turn_timeout_s = 0.25
+
+    timed_out = of(collect(brain, "take your time"), BrainError)
+    assert timed_out and "too long" in timed_out[0].message
+    assert not brain.alive or brain._process.pid != first_pid, (
+        "the child that timed out was left running, and still writing"
+    )
+
+    brain.config.turn_timeout_s = 30.0
+    events = collect(brain, "now be quick")
+    assert len(of(events, TurnComplete)) == 1, "the backlog answered this question"
+    assert not of(events, BrainError), "the next turn inherited the abandoned one"
+
+
+def test_a_timed_out_turn_says_something_a_person_would_say():
+    """`ask` produces plumbing. Only one of its messages is fit to be heard."""
+    from vesper.brain import failures
+
+    assert failures.spoken_break("that took too long, so I stopped waiting") == (
+        "that took too long, so I stopped waiting"
+    )
+    for internal in (
+        "could not reach the brain: [WinError 232] The pipe is being closed",
+        "the brain closed its output stream",
+        "stdout reader failed: C:/Users/somebody/Vesper/vesper/brain/claude.py",
+        "",
+    ):
+        spoken = failures.spoken_break(internal)
+        assert spoken == "I lost my connection to Claude. Give me a moment and ask me again."
+        assert "\\" not in spoken and "/" not in spoken, "a path was about to be read aloud"
