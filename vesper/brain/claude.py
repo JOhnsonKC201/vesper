@@ -205,13 +205,21 @@ class ClaudeBrain:
             env=env,
             creationflags=_NO_WINDOW,
         )
+        # Handed to the pumps rather than read by them. A pump that resolves
+        # `self._events` when it writes is writing into whichever queue exists
+        # at that moment, which after a respawn is the new one. See _pump_stdout.
         self._parser = StreamParser()
         self._events = queue.Queue()
         for target, name in (
             (self._pump_stdout, "brain-stdout"),
             (self._pump_stderr, "brain-stderr"),
         ):
-            threading.Thread(target=target, daemon=True, name=name).start()
+            threading.Thread(
+                target=target,
+                args=(self._process, self._parser, self._events),
+                daemon=True,
+                name=name,
+            ).start()
 
     def stop(self, timeout: float = 5.0) -> None:
         process, self._process = self._process, None
@@ -223,8 +231,30 @@ class ClaudeBrain:
             process.wait(timeout=timeout)
         except Exception:
             process.kill()
+            # A kill is a request, not an event. Without this the pipes are
+            # still open and the pump threads are still holding them, and with
+            # two respawns per approved action those add up.
+            try:
+                process.wait(timeout=timeout)
+            except Exception:  # pragma: no cover - the OS is not cooperating
+                pass
         finally:
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None and not pipe.closed:
+                    try:
+                        pipe.close()
+                    except Exception:  # pragma: no cover
+                        pass
             self._log("brain stopped")
+
+    def _replace_process(self) -> None:
+        """Stop and respawn without taking the busy lock.
+
+        For callers that already hold it, which means from inside `ask()`.
+        `restart` is the same thing for callers that do not.
+        """
+        self.stop()
+        self.start(resume=bool(self.session_id))
 
     def restart(self) -> None:
         """Respawn, resuming the same conversation if we have a session id.
@@ -235,8 +265,7 @@ class ClaudeBrain:
         generator first, which releases the lock.
         """
         with self._busy:
-            self.stop()
-            self.start(resume=bool(self.session_id))
+            self._replace_process()
 
     def auth_status(self) -> bool | None:
         """Ask the CLI whether it is logged in, without spending a turn.
@@ -358,21 +387,34 @@ class ClaudeBrain:
 
     # --- pumps --------------------------------------------------------------
 
-    def _pump_stdout(self) -> None:
-        process = self._process
+    def _pump_stdout(self, process, parser: StreamParser, events: queue.Queue) -> None:
+        """Drain one child's stdout into one queue. Never anybody else's.
+
+        Everything here is an argument on purpose. This used to read
+        `self._parser` and `self._events` at the moment it wrote, and `start()`
+        replaces both. Every grant and every revoke respawns the child, so on
+        the way down the old pump reached EOF and ran its `finally`, putting a
+        sentinel into the queue belonging to the *new* brain. The next `ask()`
+        read that sentinel and failed the turn with "the brain closed its
+        output stream". A stale TurnComplete could arrive the same way and end
+        the next turn with the previous turn's answer and the previous turn's
+        cost.
+
+        The respawn happens on a spoken yes, so this landed on the turn
+        immediately after the user approved something.
+        """
         if process is None or process.stdout is None:
             return
         try:
             for line in process.stdout:
-                for event in self._parser.feed(line):
-                    self._events.put(event)
+                for event in parser.feed(line):
+                    events.put(event)
         except Exception as exc:  # pragma: no cover - only on pipe teardown
-            self._events.put(BrainError("stdout reader failed: " + str(exc)))
+            events.put(BrainError("stdout reader failed: " + str(exc)))
         finally:
-            self._events.put(_SENTINEL)
+            events.put(_SENTINEL)
 
-    def _pump_stderr(self) -> None:
-        process = self._process
+    def _pump_stderr(self, process, parser: StreamParser, events: queue.Queue) -> None:
         if process is None or process.stderr is None:
             return
         try:
@@ -426,6 +468,14 @@ class ClaudeBrain:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    # Giving up on the answer is not the same as the answer
+                    # stopping. Returning here used to leave the child still
+                    # working and still writing, so the backlog was waiting for
+                    # the next question: its TurnComplete ended that turn
+                    # immediately, with this turn's text and this turn's cost
+                    # charged twice. Take the process down instead.
+                    self._log("turn timed out, restarting the brain")
+                    self._replace_process()
                     yield BrainError("that took too long, so I stopped waiting")
                     return
                 try:

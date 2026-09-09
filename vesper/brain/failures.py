@@ -58,3 +58,22 @@ def classify(done: TurnComplete) -> str | None:
 def spoken_line(kind: str) -> str:
     """What Vesper says instead of the CLI's text. Plain, short, no link."""
     return _SPOKEN.get(kind, _SPOKEN[OTHER])
+
+
+# Sentences that are already fit to be said out loud. Everything else `ask()`
+# produces describes plumbing, and two of them append an OS error string, which
+# on this machine means reading a file path aloud in a voice.
+_SPEAKABLE_BREAKS = frozenset({"that took too long, so I stopped waiting"})
+
+_BROKEN = "I lost my connection to Claude. Give me a moment and ask me again."
+
+
+def spoken_break(message: str) -> str:
+    """What to say for a BrainError, which is not always what it says.
+
+    The same rule `spoken_line` applies to the CLI's error text, applied to
+    ours: what broke belongs in the log, and what the person in the room needs
+    to hear is that it broke and what to do about it.
+    """
+    cleaned = (message or "").strip()
+    return cleaned if cleaned in _SPEAKABLE_BREAKS else _BROKEN

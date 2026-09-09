@@ -327,20 +327,49 @@ def test_half_duplex_ignores_the_microphone_while_speaking():
 
 
 def test_a_brain_error_is_spoken_rather_than_swallowed():
+    """Said plainly, logged in full.
+
+    The spoken line and the logged line used to be the same string, so an OS
+    error carrying a file path was read out loud in Vesper's voice. That is the
+    failure brain/failures.py already prevents for the CLI's own error text,
+    applied now to ours.
+    """
     from vesper.brain.protocol import BrainError
+
+    raw = "could not reach the brain: [WinError 232] C:/Vesper/vesper/brain"
 
     class FailingBrain(FakeBrain):
         def ask(self, text):
             self.asked.append(text)
-            yield BrainError("I lost my connection to Claude.")
+            yield BrainError(raw)
 
     conv, _, _, voice, speaker, ui = build(transcripts=["Vesper hello"])
     conv.brain = FailingBrain()
     conv._on_utterance(audio())
     settle(speaker)
     speaker.close()
-    assert voice.lines == ["I lost my connection to Claude."]
-    assert ui.errors == ["I lost my connection to Claude."]
+
+    assert voice.lines, "a brain error must still be spoken, not swallowed"
+    spoken = voice.lines[0]
+    assert "WinError" not in spoken and "C:/" not in spoken
+    assert spoken == "I lost my connection to Claude. Give me a moment and ask me again."
+    assert ui.errors == [raw], "the detail still belongs in the log"
+
+
+def test_a_timeout_already_reads_as_a_sentence_and_is_left_alone():
+    from vesper.brain.protocol import BrainError
+
+    class SlowBrain(FakeBrain):
+        def ask(self, text):
+            self.asked.append(text)
+            yield BrainError("that took too long, so I stopped waiting")
+
+    conv, _, _, voice, speaker, _ui = build(transcripts=["Vesper hello"])
+    conv.brain = SlowBrain()
+    conv._on_utterance(audio())
+    settle(speaker)
+    speaker.close()
+    assert voice.lines == ["that took too long, so I stopped waiting"]
 
 
 def test_permission_requests_reach_the_ui_and_are_asked_out_loud():

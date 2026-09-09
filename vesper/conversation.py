@@ -1440,9 +1440,12 @@ class Conversation:
                     requests.append(request)
 
             elif isinstance(event, BrainError):
+                # The detail is logged and the plain sentence is spoken. They
+                # used to be the same string, so "could not reach the brain:
+                # [WinError 232] The pipe is being closed" was read out loud.
                 self.register.note_failure()
                 self.ui.error(event.message)
-                self._say(event.message)
+                self._say(failures.spoken_break(event.message))
                 return
 
             elif isinstance(event, TurnComplete):
