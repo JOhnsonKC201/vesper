@@ -250,6 +250,7 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
             consent_window_s=cfg.consent.window_s,
             audit_log=cfg.audit_path(),
             undo_dir=cfg.undo_path(),
+            log_transcripts=cfg.runtime.log_transcripts,
         ),
         endpoint_config=EndpointConfig(
             end_silence_ms=cfg.listening.end_silence_ms,

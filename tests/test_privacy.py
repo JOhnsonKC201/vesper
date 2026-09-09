@@ -428,3 +428,54 @@ def test_transcripts_are_kept_by_default(tmp_path):
     attach(ui, LogFile(path))
     ui.heard("Vesper what time is it", True)
     assert "what time is it" in path.read_text(encoding="utf-8")
+
+
+def test_turning_transcripts_off_covers_the_audit_log_too(tmp_path):
+    """A second file with your words in it is worse than the first.
+
+    Every other decision line describes the tool action, through
+    `request.written()`. `ASKED_FOR` is the outlier, and only because there is
+    no ActionRequest yet: an utterance that asks for the hands approves itself,
+    so the request is the sentence. It was writing up to 200 characters of
+    speech to var/actions.log whatever `log_transcripts` said.
+    """
+    import numpy as np
+
+    from vesper.audio.speaker import Speaker
+    from vesper.conversation import Conversation, ConversationConfig
+    from vesper.wake import WakeConfig, WakeGate
+
+    from conftest import FakeBrain, FakeMic, FakeSTT, FakeVoice, RecordingUI
+
+    secret = "Vesper, click the button that says my bank password is Hunter2"
+    audit_log = tmp_path / "actions.log"
+
+    def run(*, log_transcripts: bool):
+        audit_log.unlink(missing_ok=True)
+        speaker = Speaker(FakeVoice(duration=0.0))
+        conv = Conversation(
+            brain=FakeBrain(["Done."]),
+            stt=FakeSTT([secret]),
+            speaker=speaker,
+            mic=FakeMic(),
+            wake=WakeGate(WakeConfig()),
+            config=ConversationConfig(
+                greet_on_start=False,
+                audit_log=audit_log,
+                log_transcripts=log_transcripts,
+            ),
+            ui=RecordingUI(),
+        )
+        conv._on_utterance(np.full(16000, 0.2, dtype=np.float32))
+        speaker.wait_until_idle(5.0)
+        speaker.close()
+        return audit_log.read_text(encoding="utf-8") if audit_log.exists() else ""
+
+    kept = run(log_transcripts=True)
+    assert "Hunter2" in kept, "the audit log should quote the request by default"
+
+    dropped = run(log_transcripts=False)
+    assert "Hunter2" not in dropped, "the words reached the audit log anyway"
+    assert "bank password" not in dropped
+    # The decision itself is still on the record, which is what an audit is for.
+    assert "asked for" in dropped.lower() or "hands" in dropped.lower(), dropped

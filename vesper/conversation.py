@@ -194,6 +194,12 @@ class ConversationConfig:
     # Where copies of changed files are kept, so "undo that" can put them back.
     # None disables it, which makes every approved change permanent.
     undo_dir: Path | None = None
+    # Mirrors runtime.log_transcripts. The audit log has one line that quotes
+    # what was said, `_run_with_hands`, and somebody who turned transcripts off
+    # would reasonably expect that to cover every file, not just the diagnostic
+    # one. Being surprised by a second file with your words in it is worse than
+    # being surprised by the first.
+    log_transcripts: bool = True
 
 
 class Conversation:
@@ -1360,9 +1366,17 @@ class Conversation:
         any other grant. Everything Vesper thinks of on its own still asks.
         """
         self.approvals += 1
-        self.ui.decision(audit.ASKED_FOR, f"hands: {text[:200]}")
+        # The one decision line that quotes what was said. Every other one
+        # describes the tool action instead, through `request.written()`, and
+        # this is the outlier only because there is no ActionRequest yet: the
+        # request is the sentence, since a sentence that asks for the hands
+        # approves itself. With transcripts off it is recorded the same way
+        # logfile.py records a heard line, which keeps the fact and the shape
+        # and drops the words.
+        said = text[:200] if self.config.log_transcripts else f"[{len(text)} chars]"
+        self.ui.decision(audit.ASKED_FOR, f"hands: {said}")
         if self.config.audit_log is not None:
-            audit.record(self.config.audit_log, audit.ASKED_FOR, f"hands: {text[:200]}")
+            audit.record(self.config.audit_log, audit.ASKED_FOR, f"hands: {said}")
         self.brain.grant(HAND_SPECS)
         try:
             self._run_turn(HANDS_ASKED_NOTE + "\n\n" + payload)
