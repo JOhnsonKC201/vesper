@@ -47,7 +47,6 @@ class Transcript:
     latency_s: float = 0.0
     avg_logprob: float = 0.0
     no_speech_prob: float = 0.0
-    low_confidence_words: tuple[str, ...] = ()
     rejected_reason: str = ""
 
     @property
@@ -75,7 +74,6 @@ class WhisperConfig:
     short_clip_s: float = 3.0
     min_duration_s: float = 0.35
     min_rms: float = 0.003
-    word_confidence_floor: float = 0.55
     # The model's own confidence, which was being measured and then ignored.
     # An always-on assistant hands Whisper near-silence all day, and it answers
     # with fluent invented English rather than with nothing.
@@ -299,14 +297,20 @@ class Listener:
         pieces: list[str] = []
         logprobs: list[float] = []
         no_speech: list[float] = []
-        weak_words: list[str] = []
         try:
             segments, info = self._model.transcribe(
                 audio,
                 language=self.config.language,
                 beam_size=beam,
                 vad_filter=True,
-                word_timestamps=True,
+                # word_timestamps is deliberately absent. It makes
+                # faster-whisper run a second alignment pass over every
+                # segment, and the only thing that pass produced here was
+                # `low_confidence_words`, which nothing in the package or in
+                # scripts/ ever read. Measured on small.en over the four wav
+                # fixtures, 7 passes each: 344ms to 320ms on the gpu, and
+                # 1529ms to 1415ms on the cpu. Seven percent of the decode, on
+                # the one thing that sits directly between you and an answer.
                 # Without this, one bad transcription poisons every later one.
                 condition_on_previous_text=False,
                 initial_prompt=self.config.initial_prompt,
@@ -319,9 +323,6 @@ class Listener:
                 pieces.append(segment.text)
                 logprobs.append(getattr(segment, "avg_logprob", 0.0) or 0.0)
                 no_speech.append(getattr(segment, "no_speech_prob", 0.0) or 0.0)
-                for word in getattr(segment, "words", None) or []:
-                    if (word.probability or 1.0) < self.config.word_confidence_floor:
-                        weak_words.append(word.word.strip())
         except Exception as exc:
             # Never let this reach the audio loop. An assistant started at login
             # has no console, so an exception here is not a traceback anyone
@@ -346,7 +347,6 @@ class Listener:
             latency_s=time.monotonic() - started,
             avg_logprob=float(np.mean(logprobs)) if logprobs else 0.0,
             no_speech_prob=float(np.mean(no_speech)) if no_speech else 0.0,
-            low_confidence_words=tuple(weak_words),
         )
 
         reason = self._post_gate(transcript)

@@ -376,3 +376,30 @@ def test_a_working_model_probes_clean_and_a_broken_one_reports_why():
 
     assert accel.probe(Works()) == ""
     assert "cublas64_12" in accel.probe(Broken())
+
+
+def test_the_decoder_is_not_asked_for_word_timings():
+    """They cost an alignment pass per segment and nothing read the result.
+
+    Measured on small.en over the wav fixtures, 7 passes each: 344ms against
+    320ms on the gpu, 1529ms against 1415ms on the cpu. Seven percent of the
+    decode, on the step that sits directly in front of the answer.
+
+    If a future feature wants them back, that is fine, but it should arrive
+    with the feature rather than on its own.
+    """
+    stt = Listener(WhisperConfig(model="tiny.en", device="cpu"), log=lambda m: None)
+    stt.load()
+    asked = {}
+
+    real = stt._model.transcribe
+
+    def record(audio, **kwargs):
+        asked.update(kwargs)
+        return real(audio, **kwargs)
+
+    stt._model.transcribe = record
+    stt.transcribe(load_wav("speech_short.wav"))
+
+    assert asked, "transcribe was never called"
+    assert not asked.get("word_timestamps"), "the alignment pass is back"
