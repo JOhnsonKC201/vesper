@@ -193,3 +193,139 @@ def test_reset_abandons_a_partial_utterance(speech):
     endpointer.reset()
     assert endpointer.collecting is False
     assert endpointer.flush() is None
+
+
+# --- looking early, so transcription happens during the wait ----------------
+#
+# The endpointer waits 700ms to be sure you have stopped. Transcription does not
+# need that wait: whatever was said before the pause is already final. So the
+# caller gets a prefix at 250ms and spends the remaining 450ms transcribing it,
+# which takes the whole of Whisper off the critical path when nothing more is
+# said. These pin the contract that makes that safe to rely on.
+
+
+def _endpointer(**kwargs):
+    settings = dict(start_speech_ms=60, end_silence_ms=700, min_utterance_ms=100,
+                    early_silence_ms=250)
+    settings.update(kwargs)
+    return Endpointer(VoiceActivity(), EndpointConfig(**settings))
+
+
+def _blocks(endpointer, audio, size=512):
+    """Feed an array in blocks, returning any completed utterance."""
+    done = None
+    for start in range(0, audio.size, size):
+        out = endpointer.feed(audio[start:start + size])
+        if out is not None:
+            done = out
+    return done
+
+
+def test_nothing_to_look_at_before_anything_is_said(speech):
+    endpointer = _endpointer()
+    assert endpointer.peek() is None
+
+
+def test_nothing_to_look_at_while_you_are_still_talking(speech):
+    endpointer = _endpointer()
+    _blocks(endpointer, speech[:16000])
+    assert endpointer.collecting
+    assert endpointer.peek() is None
+
+
+def test_a_prefix_arrives_once_the_pause_is_long_enough(speech):
+    endpointer = _endpointer()
+    _blocks(endpointer, speech[:16000])
+    _blocks(endpointer, np.zeros(int(16000 * 0.4), dtype=np.float32))
+
+    early = endpointer.peek()
+    assert early is not None
+    assert early.size > 0
+
+
+def test_the_prefix_is_offered_only_once(speech):
+    endpointer = _endpointer()
+    _blocks(endpointer, speech[:16000])
+    _blocks(endpointer, np.zeros(int(16000 * 0.4), dtype=np.float32))
+
+    assert endpointer.peek() is not None
+    assert endpointer.peek() is None
+
+
+def test_the_prefix_is_a_verbatim_prefix_of_the_real_utterance(speech):
+    """The whole saving rests on this: a transcript of the prefix is the real
+    transcript when nothing more is said, so it has to be the same audio."""
+    endpointer = _endpointer()
+    _blocks(endpointer, speech[:16000])
+    _blocks(endpointer, np.zeros(int(16000 * 0.4), dtype=np.float32))
+    early = endpointer.peek()
+
+    final = _blocks(endpointer, np.zeros(int(16000 * 0.6), dtype=np.float32))
+    assert final is not None
+    assert final.size >= early.size
+    assert np.array_equal(final[:early.size], early)
+
+
+def test_silence_after_the_prefix_means_the_prefix_was_the_whole_thing(speech):
+    endpointer = _endpointer()
+    _blocks(endpointer, speech[:16000])
+    _blocks(endpointer, np.zeros(int(16000 * 0.4), dtype=np.float32))
+    assert endpointer.peek() is not None
+
+    assert _blocks(endpointer, np.zeros(int(16000 * 0.6), dtype=np.float32)) is not None
+    assert endpointer.peek_was_final is True
+
+
+def test_talking_again_after_the_prefix_invalidates_it(speech):
+    """Pausing mid thought must not answer half a sentence."""
+    endpointer = _endpointer()
+    _blocks(endpointer, speech[:16000])
+    _blocks(endpointer, np.zeros(int(16000 * 0.4), dtype=np.float32))
+    assert endpointer.peek() is not None
+
+    _blocks(endpointer, speech[:16000])
+    assert _blocks(endpointer, np.zeros(int(16000 * 0.9), dtype=np.float32)) is not None
+    assert endpointer.peek_was_final is False
+
+
+def test_an_utterance_with_no_early_look_is_never_reported_as_final(speech):
+    """peek_was_final must mean "the prefix held", not "nobody looked"."""
+    endpointer = _endpointer(early_silence_ms=0)
+    _blocks(endpointer, speech[:16000])
+    assert _blocks(endpointer, np.zeros(int(16000 * 0.9), dtype=np.float32)) is not None
+    assert endpointer.peek_was_final is False
+
+
+def test_zero_disables_the_early_look_entirely(speech):
+    endpointer = _endpointer(early_silence_ms=0)
+    _blocks(endpointer, speech[:16000])
+    _blocks(endpointer, np.zeros(int(16000 * 0.5), dtype=np.float32))
+    assert endpointer.peek() is None
+
+
+def test_the_early_look_does_not_change_what_an_utterance_is(speech):
+    """Same audio in, same utterance out, whether or not anybody looked early."""
+    with_peek = _endpointer()
+    _blocks(with_peek, speech[:16000])
+    _blocks(with_peek, np.zeros(int(16000 * 0.4), dtype=np.float32))
+    with_peek.peek()
+    first = _blocks(with_peek, np.zeros(int(16000 * 0.6), dtype=np.float32))
+
+    without = _endpointer(early_silence_ms=0)
+    _blocks(without, speech[:16000])
+    _blocks(without, np.zeros(int(16000 * 0.4), dtype=np.float32))
+    second = _blocks(without, np.zeros(int(16000 * 0.6), dtype=np.float32))
+
+    assert first is not None and second is not None
+    assert np.array_equal(first, second)
+
+
+def test_a_new_utterance_starts_with_a_clean_slate(speech):
+    endpointer = _endpointer()
+    _blocks(endpointer, speech[:16000])
+    _blocks(endpointer, np.zeros(int(16000 * 0.4), dtype=np.float32))
+    endpointer.peek()
+    _blocks(endpointer, np.zeros(int(16000 * 0.6), dtype=np.float32))
+
+    _blocks(endpointer, speech[:16000])
+    assert endpointer.peek() is None, "the new utterance inherited the old peek"

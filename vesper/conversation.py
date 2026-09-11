@@ -184,6 +184,20 @@ class ConversationConfig:
     # microphone already listening again.
     tail_mute_ms: int = 350
     echo_similarity: float = 0.6
+    # How long to wait for a speculative transcript that is already running on the
+    # same audio. Waiting is never slower than starting over, so this is not a
+    # tuning knob: it is a ceiling so a wedged worker cannot hang the audio loop.
+    early_transcribe_wait_s: float = 8.0
+    # How long a turn may stay silent before Vesper says something, anything, to
+    # show it is working. Until this existed a holding phrase only ever fired on
+    # the first tool call, so a plain question, which is most of them, bought the
+    # brain's whole time to first token as dead air: measured at about 1.5s on the
+    # subscription. The answer is not faster, but the silence before it is gone,
+    # and silence is the part that reads as a crash.
+    #
+    # Comfortably inside that 1.5s, and far enough from zero that a cached or
+    # local answer beats the timer and nothing is said at all. Zero disables it.
+    quick_filler_after_s: float = 0.8
     # A second holding phrase if a turn is still running this long into it.
     still_working_after_s: float = 11.0
     greet_on_start: bool = True
@@ -326,6 +340,14 @@ class Conversation:
         self.register = register.Register()
         # The last thing asked, to notice it being asked again.
         self._last_asked = ""
+        # A prefix transcribed while the endpointer was still waiting out the
+        # end-of-speech silence, and the event that says the worker has finished.
+        # Both are cleared by `_transcript_for` as it collects them.
+        self._early_ready: threading.Event | None = None
+        self._early_transcript = None
+        # One decode at a time. The speculative worker and the audio loop can
+        # both want the transcriber, and whisper models are not reentrant.
+        self._stt_lock = threading.Lock()
         self.voice_rejections = 0
         # Whether the voice profile is doing its job, which went unasked for
         # eleven days while it rejected its owner 266 times and matched nobody.
@@ -687,6 +709,70 @@ class Conversation:
         utterance = self.endpointer.feed(block, preroll=self.mic.preroll)
         if utterance is not None:
             self._on_utterance(utterance)
+            return
+        # Still waiting out the rest of the end-of-speech silence. Whatever was
+        # said before this pause is already final, so transcribe it during the
+        # wait rather than in the gap between being sure and answering.
+        early = self.endpointer.peek()
+        if early is not None:
+            self._start_early_transcription(early)
+
+    # --- transcribing during the pause --------------------------------------
+
+    def _start_early_transcription(self, audio: np.ndarray) -> None:
+        """Transcribe a prefix on a worker thread. Never blocks the audio loop.
+
+        The audio loop runs thirty times a second and must keep reading, so this
+        starts a thread and returns. `_transcript_for` collects the result, and
+        throws it away if more was said after the prefix was taken.
+        """
+        self._early_ready = threading.Event()
+        self._early_transcript = None
+
+        def work() -> None:
+            try:
+                with self._stt_lock:
+                    self._early_transcript = self.stt.transcribe(audio)
+            except Exception as exc:  # a speculative transcript, so never fatal
+                self.ui.info(f"early transcription failed: {exc}")
+            finally:
+                self._early_ready.set()
+
+        threading.Thread(target=work, daemon=True, name="vesper-early-stt").start()
+
+    def _transcript_for(self, audio: np.ndarray):
+        """The transcript of this utterance, speculative if one still fits.
+
+        The speculative one is used only when the endpointer confirms nothing was
+        said after the prefix was taken, which makes the prefix the whole
+        utterance and its transcript the real one. Otherwise it is discarded and
+        the full audio is transcribed, which is exactly what used to happen.
+        """
+        ready, early = self._early_ready, self._early_transcript
+        self._early_ready, self._early_transcript = None, None
+
+        if ready is not None and self.endpointer.peek_was_final:
+            # Waiting is never slower than starting over: this began earlier, on
+            # the same audio. The bound is only there so a wedged worker cannot
+            # hang the loop, and the serialising lock below means the fallback
+            # cannot then run a second decode alongside it.
+            if ready.wait(self.config.early_transcribe_wait_s):
+                if self._early_or_none(early) is not None:
+                    self.ui.thinking("transcribed while you paused")
+                    return early
+        with self._stt_lock:
+            return self.stt.transcribe(audio)
+
+    @staticmethod
+    def _early_or_none(transcript):
+        """A speculative transcript worth using, or None.
+
+        A rejected one is not reused: the post-gate judged a prefix, and the
+        full utterance deserves to be judged on its own.
+        """
+        if transcript is None or not getattr(transcript, "ok", False):
+            return None
+        return transcript
 
     # --- awake and asleep ---------------------------------------------------
 
@@ -764,7 +850,7 @@ class Conversation:
 
     def _on_utterance(self, audio: np.ndarray) -> None:
         self.ui.thinking("transcribing")
-        transcript = self.stt.transcribe(audio)
+        transcript = self._transcript_for(audio)
         if not transcript.ok:
             self.ui.discarded(transcript.rejected_reason or "unclear")
             return
@@ -1574,7 +1660,10 @@ class Conversation:
         started = time.monotonic()
         spoke_at: float | None = None
         spoken_anything = False
-        said_filler = False
+        # A dict rather than a local, because a timer thread has to read and set
+        # it too, and a closure cannot rebind a local it does not own.
+        filler = {"said": False}
+        filler_lock = threading.Lock()
         said_second_filler = False
         screen_buffer = ""
         # The last thing Claude said, fillers excluded. If it ends in a question
@@ -1613,129 +1702,160 @@ class Conversation:
         # across Claude to report one is how you end up hearing neither.
         extras: list[str] = []
 
+        def hold_the_line() -> None:
+            """One short holding phrase, if nothing real has been said yet.
+
+            Called from the timer below and from the first tool call, so the
+            check and the claim happen under one lock: without it, a question
+            that starts a tool call at exactly the deadline says "let me look"
+            twice, from two threads, into the same speaker queue.
+            """
+            nonlocal spoke_at
+            with filler_lock:
+                if spoken_anything or filler["said"]:
+                    return
+                filler["said"] = True
+            spoke_at = spoke_at or time.monotonic()
+            self._say(self._filler(THINKING_FILLERS))
+
         self.ui.thinking("thinking")
         # Held by name so a failed turn can close it before respawning: the
         # real brain's `ask` holds its busy lock for as long as the generator
         # is open, and a respawn from inside it would deadlock.
         events = self.brain.ask(payload)
-        for event in events:
-            if isinstance(event, TextDelta):
-                spoken_delta, screen_delta = router.feed(event.text)
-                screen_buffer += screen_delta
-                # Emit a screen block once it closes, never delta by delta, or
-                # the terminal fills with four-character fragments.
-                if screen_buffer and not router.in_screen:
-                    self.ui.screen(screen_buffer.strip())
-                    screen_buffer = ""
-                for sentence in assembler.feed(spoken_delta):
-                    say_sentence(sentence)
+        # Cancelled in the `finally` below on every exit path. Without that a
+        # turn that failed fast would apologise and then, half a second later,
+        # cheerfully say "let me look" into the silence after it.
+        quick_filler = None
+        if self.config.quick_filler_after_s > 0:
+            quick_filler = threading.Timer(
+                self.config.quick_filler_after_s, hold_the_line
+            )
+            quick_filler.daemon = True
+            quick_filler.start()
+        try:
+            for event in events:
+                if isinstance(event, TextDelta):
+                    spoken_delta, screen_delta = router.feed(event.text)
+                    screen_buffer += screen_delta
+                    # Emit a screen block once it closes, never delta by delta, or
+                    # the terminal fills with four-character fragments.
+                    if screen_buffer and not router.in_screen:
+                        self.ui.screen(screen_buffer.strip())
+                        screen_buffer = ""
+                    for sentence in assembler.feed(spoken_delta):
+                        say_sentence(sentence)
 
-            elif isinstance(event, ToolStarted):
-                self.ui.tool(event.name, event.detail)
-                unasked = self._unasked_use(granted, event)
-                if unasked is not None:
-                    extras.append(unasked)
-                # Speak as soon as Claude starts working, not when it finishes.
-                if not spoken_anything and not said_filler:
-                    said_filler = True
-                    spoke_at = spoke_at or time.monotonic()
-                    self._say(self._filler(THINKING_FILLERS))
-                elif (
-                    not spoken_anything
-                    and time.monotonic() - started > self.config.still_working_after_s
-                    and not said_second_filler
-                ):
-                    said_second_filler = True
-                    self._say(self._filler(STILL_WORKING_FILLERS))
+                elif isinstance(event, ToolStarted):
+                    self.ui.tool(event.name, event.detail)
+                    unasked = self._unasked_use(granted, event)
+                    if unasked is not None:
+                        extras.append(unasked)
+                    # Speak as soon as Claude starts working, not when it finishes.
+                    if not spoken_anything and not filler["said"]:
+                        hold_the_line()
+                    elif (
+                        not spoken_anything
+                        and time.monotonic() - started > self.config.still_working_after_s
+                        and not said_second_filler
+                    ):
+                        said_second_filler = True
+                        self._say(self._filler(STILL_WORKING_FILLERS))
 
-            elif isinstance(event, PermissionNeeded):
-                # Collected, not asked about yet. The turn is still running and
-                # Claude usually has a sentence to say about what it was doing;
-                # interrupting that to ask a question would talk over it.
-                request = ActionRequest(
-                    tool=event.tool,
-                    tool_input=event.tool_input,
-                    tool_use_id=event.tool_use_id,
-                    message=event.message,
-                )
-                if request.key not in seen:
-                    seen.add(request.key)
-                    requests.append(request)
+                elif isinstance(event, PermissionNeeded):
+                    # Collected, not asked about yet. The turn is still running and
+                    # Claude usually has a sentence to say about what it was doing;
+                    # interrupting that to ask a question would talk over it.
+                    request = ActionRequest(
+                        tool=event.tool,
+                        tool_input=event.tool_input,
+                        tool_use_id=event.tool_use_id,
+                        message=event.message,
+                    )
+                    if request.key not in seen:
+                        seen.add(request.key)
+                        requests.append(request)
 
-            elif isinstance(event, BrainError):
-                # The detail is logged and the plain sentence is spoken. They
-                # used to be the same string, so "could not reach the brain:
-                # [WinError 232] The pipe is being closed" was read out loud.
-                self.register.note_failure()
-                self.ui.error(event.message)
-                self._say(failures.spoken_break(event.message))
-                return
-
-            elif isinstance(event, TurnComplete):
-                kind = failures.classify(event)
-                if kind is not None:
-                    events.close()
-                    self._failed_turn(event, kind, payload, granted, retried)
+                elif isinstance(event, BrainError):
+                    # The detail is logged and the plain sentence is spoken. They
+                    # used to be the same string, so "could not reach the brain:
+                    # [WinError 232] The pipe is being closed" was read out loud.
+                    self.register.note_failure()
+                    self.ui.error(event.message)
+                    self._say(failures.spoken_break(event.message))
                     return
 
-                spoken_tail, screen_tail = router.flush()
-                for sentence in assembler.feed(spoken_tail):
-                    say_sentence(sentence)
-                leftover = (screen_buffer + screen_tail).strip()
-                if leftover:
-                    self.ui.screen(leftover)
-                tail = assembler.flush()
-                if tail:
-                    say_sentence(tail)
+                elif isinstance(event, TurnComplete):
+                    kind = failures.classify(event)
+                    if kind is not None:
+                        events.close()
+                        self._failed_turn(event, kind, payload, granted, retried)
+                        return
 
-                # Fallback for a turn that produced no streaming deltas at all.
-                # Partial messages can be absent, and silence would look like a
-                # crash to the user rather than a missing flag.
-                if not spoken_anything and event.text.strip():
-                    fallback, screen_only = split_channels(event.text)
-                    if screen_only:
-                        self.ui.screen(screen_only)
-                    if requests:
-                        # Sentence by sentence, not as one blob: a reply that
-                        # ends in "I need permission" usually starts with
-                        # something worth hearing.
-                        fallback = _without_refusal_noise(fallback)
-                    if fallback:
-                        spoke_at = spoke_at or time.monotonic()
-                        last_spoken = fallback
-                        self._say(fallback)
+                    spoken_tail, screen_tail = router.flush()
+                    for sentence in assembler.feed(spoken_tail):
+                        say_sentence(sentence)
+                    leftover = (screen_buffer + screen_tail).strip()
+                    if leftover:
+                        self.ui.screen(leftover)
+                    tail = assembler.flush()
+                    if tail:
+                        say_sentence(tail)
 
-                self.register.note_success()
-                self.ui.answered(
-                    event,
-                    total_s=time.monotonic() - started,
-                    first_speech_s=(spoke_at - started) if spoke_at else None,
-                )
-                if extras:
-                    self._report_unasked(extras)
+                    # Fallback for a turn that produced no streaming deltas at all.
+                    # Partial messages can be absent, and silence would look like a
+                    # crash to the user rather than a missing flag.
+                    if not spoken_anything and event.text.strip():
+                        fallback, screen_only = split_channels(event.text)
+                        if screen_only:
+                            self.ui.screen(screen_only)
+                        if requests:
+                            # Sentence by sentence, not as one blob: a reply that
+                            # ends in "I need permission" usually starts with
+                            # something worth hearing.
+                            fallback = _without_refusal_noise(fallback)
+                        if fallback:
+                            spoke_at = spoke_at or time.monotonic()
+                            last_spoken = fallback
+                            self._say(fallback)
 
-                if not requests and last_spoken.rstrip().endswith("?"):
-                    # He asked something: which of two buttons, which file, what
-                    # was meant. The answer needs longer than a follow-up, and
-                    # it must not need his name, so the window is held open as
-                    # long as a consent question would be.
-                    self._in_exchange = True
-                    self.wake.hold_open(
-                        time.monotonic() + self.config.consent_window_s
+                    self.register.note_success()
+                    self.ui.answered(
+                        event,
+                        total_s=time.monotonic() - started,
+                        first_speech_s=(spoke_at - started) if spoke_at else None,
                     )
+                    if extras:
+                        self._report_unasked(extras)
 
-                if requests and self.config.consent_enabled:
-                    # Only the first is put to the user; the rest are recorded
-                    # as refused rather than vanishing. They were being dropped
-                    # entirely, which left the audit log claiming to hold every
-                    # decision while quietly missing some.
-                    for ignored in requests[1:]:
-                        self._log_decision(audit.DECLINED, ignored)
-                    self._ask_consent(requests[0], others=len(requests) - 1)
-                elif requests:
-                    for refused in requests:
-                        self._log_decision(audit.DECLINED, refused)
-                return
+                    if not requests and last_spoken.rstrip().endswith("?"):
+                        # He asked something: which of two buttons, which file, what
+                        # was meant. The answer needs longer than a follow-up, and
+                        # it must not need his name, so the window is held open as
+                        # long as a consent question would be.
+                        self._in_exchange = True
+                        self.wake.hold_open(
+                            time.monotonic() + self.config.consent_window_s
+                        )
+
+                    if requests and self.config.consent_enabled:
+                        # Only the first is put to the user; the rest are recorded
+                        # as refused rather than vanishing. They were being dropped
+                        # entirely, which left the audit log claiming to hold every
+                        # decision while quietly missing some.
+                        for ignored in requests[1:]:
+                            self._log_decision(audit.DECLINED, ignored)
+                        self._ask_consent(requests[0], others=len(requests) - 1)
+                    elif requests:
+                        for refused in requests:
+                            self._log_decision(audit.DECLINED, refused)
+                    return
+
+        finally:
+            # Every exit path, `return` inside the loop included. A timer
+            # left running outlives the turn it belonged to.
+            if quick_filler is not None:
+                quick_filler.cancel()
 
         # Falling out of the loop without a TurnComplete means the turn was
         # interrupted. Tell Claude, so it does not assume it was heard.

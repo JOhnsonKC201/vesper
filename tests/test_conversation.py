@@ -797,3 +797,131 @@ def test_an_uncalibrated_profile_is_never_learned_into():
     speaker.close()
 
     assert print_.adapted == 0
+
+
+# --- reacting fast ----------------------------------------------------------
+#
+# Two separate savings. A prefix is transcribed while the endpointer is still
+# waiting out the silence, which takes the transcriber off the critical path
+# entirely; and a holding phrase now fires on a deadline rather than only on the
+# first tool call, so a plain question no longer buys the brain's whole time to
+# first token as dead air.
+
+
+class SlowBrain(FakeBrain):
+    """Says nothing for a while, then answers. The shape of a real first token."""
+
+    def __init__(self, replies, delay=0.45):
+        super().__init__(replies)
+        self.delay = delay
+
+    def ask(self, payload):
+        time.sleep(self.delay)
+        yield from super().ask(payload)
+
+
+def _slow_build(replies, delay=0.45, **kwargs):
+    conv, brain, stt, voice, speaker, ui = build(replies=replies, **kwargs)
+    slow = SlowBrain(replies, delay=delay)
+    conv.brain = slow
+    return conv, slow, voice, speaker, ui
+
+
+def test_a_silent_turn_gets_a_holding_phrase():
+    """Without this a plain question is 1.5s of silence, which reads as a crash."""
+    conv, _, voice, speaker, _ = _slow_build(["It is half past two."], delay=0.5)
+    conv.config.quick_filler_after_s = 0.1
+    conv.respond("what time is it")
+    settle(speaker)
+    speaker.close()
+
+    assert len(voice.lines) == 2, voice.lines
+    assert voice.lines[-1] == "It is half past two."
+
+
+def test_a_fast_turn_says_no_holding_phrase_at_all():
+    """The filler is for dead air. An answer that arrives first leaves none."""
+    conv, _, voice, speaker, _ = _slow_build(["Half past two."], delay=0.0)
+    conv.config.quick_filler_after_s = 5.0
+    conv.respond("what time is it")
+    settle(speaker)
+    speaker.close()
+
+    assert voice.lines == ["Half past two."]
+
+
+def test_zero_disables_the_holding_phrase():
+    conv, _, voice, speaker, _ = _slow_build(["Half past two."], delay=0.3)
+    conv.config.quick_filler_after_s = 0.0
+    conv.respond("what time is it")
+    settle(speaker)
+    speaker.close()
+
+    assert voice.lines == ["Half past two."]
+
+
+def test_only_one_holding_phrase_however_many_threads_want_one():
+    """The timer and the first tool call both want to speak. One of them wins."""
+    conv, brain, voice, speaker, _ = _slow_build(["Done."], delay=0.3)
+    conv.config.quick_filler_after_s = 0.05
+    brain.tools_to_report = [("Bash", "ls")]
+    conv.respond("list my files")
+    settle(speaker)
+    speaker.close()
+
+    assert len(voice.lines) == 2, voice.lines
+
+
+def test_the_timer_does_not_speak_after_the_turn_is_over():
+    """A cancelled timer is the whole reason the turn wraps in try/finally.
+
+    Left running, a turn that answered instantly would be followed half a second
+    later by a cheerful "let me look" into the silence.
+    """
+    conv, _, voice, speaker, _ = _slow_build(["Half past two."], delay=0.0)
+    conv.config.quick_filler_after_s = 0.15
+    conv.respond("what time is it")
+    settle(speaker)
+    time.sleep(0.4)  # past the deadline the timer would have fired at
+    settle(speaker)
+    speaker.close()
+
+    assert voice.lines == ["Half past two."]
+
+
+def test_a_prefix_transcribed_during_the_pause_is_the_one_used():
+    conv, _, stt, _, speaker, _ = build(
+        replies=["Two."], transcripts=["Vesper, what is one plus one"]
+    )
+    conv._start_early_transcription(audio())
+    conv.endpointer.peek_was_final = True
+    transcript = conv._transcript_for(audio())
+    speaker.close()
+
+    assert transcript.text == "Vesper, what is one plus one"
+    # One decode, not two: the saving is that the full audio is never re-read.
+    assert stt.calls == 1, stt.calls
+
+
+def test_a_prefix_is_thrown_away_when_you_kept_talking():
+    """Answering half a sentence because somebody paused is the failure here."""
+    conv, _, stt, _, speaker, _ = build(
+        replies=["Two."], transcripts=["Vesper, what is one", "Vesper, what is one plus one"]
+    )
+    conv._start_early_transcription(audio())
+    conv.endpointer.peek_was_final = False
+    transcript = conv._transcript_for(audio())
+    speaker.close()
+
+    assert transcript.text == "Vesper, what is one plus one"
+
+
+def test_no_prefix_means_the_ordinary_path():
+    conv, _, stt, _, speaker, _ = build(
+        replies=["Two."], transcripts=["Vesper, what time is it"]
+    )
+    transcript = conv._transcript_for(audio())
+    speaker.close()
+
+    assert transcript.text == "Vesper, what time is it"
+    assert stt.calls == 1
