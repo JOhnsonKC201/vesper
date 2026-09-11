@@ -13,6 +13,7 @@ import pytest
 
 from vesper.audio.speaker import Speaker
 from vesper.audio.vad import EndpointConfig
+from vesper import conversation as conversation_module
 from vesper.conversation import Conversation, ConversationConfig
 from vesper.wake import WakeConfig, WakeGate
 
@@ -662,3 +663,137 @@ def test_the_first_utterance_never_builds_a_second_model():
         thread.join(timeout=30)
 
     assert len(builds) == 1, f"{len(builds)} models were built at once"
+
+
+# --- the voice profile, watched rather than trusted --------------------------
+#
+# Added after a real profile rejected its owner 266 times across eleven days and
+# nothing anywhere said so. These pin the two halves of the fix: a profile that
+# never matches is called out, and a profile that does match keeps up with the
+# room it is used in.
+
+
+class StubProfile:
+    def __init__(self, *, calibrated=True, match_threshold=0.5):
+        self.calibrated = calibrated
+        self.match_threshold = match_threshold
+        self.reject_threshold = match_threshold - 0.2
+        self.samples = 4
+        self.created = "2026-09-11T00:00:00"
+        self.spread = 0.9
+
+
+class StubVoicePrint:
+    """A voiceprint whose verdict the test chooses."""
+
+    def __init__(self, verdict, score, *, calibrated=True, match_threshold=0.5):
+        self.enrolled = True
+        self.profile = StubProfile(
+            calibrated=calibrated, match_threshold=match_threshold
+        )
+        self._verdict, self._score = verdict, score
+        self.adapted = 0
+
+    def compare(self, audio, sample_rate=16000):
+        return self._verdict, self._score
+
+    def adapt(self, audio, sample_rate=16000):
+        self.adapted += 1
+        return True
+
+
+def _score_many(conv, count):
+    for _ in range(count):
+        conv._is_the_right_voice(audio())
+
+
+def test_a_profile_that_never_matches_is_called_out_once():
+    conv, _, _, _, speaker, ui = build()
+    conv.voiceprint = StubVoicePrint("unsure", 0.32)
+    _score_many(conv, conversation_module.VOICE_DOUBT_AFTER + 6)
+    speaker.close()
+
+    complaints = [w for w in ui.warnings if "not matched you" in w]
+    assert len(complaints) == 1, ui.warnings
+    assert "--voicecheck" in complaints[0]
+
+
+def test_nothing_is_said_before_there_is_enough_evidence():
+    conv, _, _, _, speaker, ui = build()
+    conv.voiceprint = StubVoicePrint("unsure", 0.32)
+    _score_many(conv, conversation_module.VOICE_DOUBT_AFTER - 1)
+    speaker.close()
+
+    assert not [w for w in ui.warnings if "not matched you" in w]
+
+
+def test_a_working_profile_is_never_called_out():
+    conv, _, _, _, speaker, ui = build()
+    conv.voiceprint = StubVoicePrint("match", 0.82)
+    _score_many(conv, conversation_module.VOICE_DOUBT_AFTER + 6)
+    speaker.close()
+
+    assert not [w for w in ui.warnings if "not matched you" in w]
+
+
+def test_rejections_alone_still_raise_the_alarm():
+    """Ignoring you 266 times is the failure mode, so it has to count too."""
+    conv, _, _, _, speaker, ui = build()
+    conv.voiceprint = StubVoicePrint("different", 0.10)
+    _score_many(conv, conversation_module.VOICE_DOUBT_AFTER + 2)
+    speaker.close()
+
+    assert [w for w in ui.warnings if "not matched you" in w]
+
+
+def test_status_reports_both_halves_of_the_voice_story():
+    conv, _, _, _, speaker, _ = build()
+    conv.voiceprint = StubVoicePrint("match", 0.82)
+    _score_many(conv, 3)
+    speaker.close()
+
+    status = conv.status()
+    assert status["voice_scored"] == 3
+    assert status["voice_matches"] == 3
+
+
+def test_a_marginal_match_is_folded_into_the_profile():
+    """A clip that only just cleared the bar is the one worth learning from."""
+    conv, _, _, _, speaker, _ = build()
+    print_ = StubVoicePrint("match", 0.52, match_threshold=0.5)
+    conv.voiceprint = print_
+    conv._is_the_right_voice(audio())
+    speaker.close()
+
+    assert print_.adapted == 1
+
+
+def test_a_comfortable_match_teaches_nothing_and_is_not_stored():
+    conv, _, _, _, speaker, _ = build()
+    print_ = StubVoicePrint("match", 0.95, match_threshold=0.5)
+    conv.voiceprint = print_
+    conv._is_the_right_voice(audio())
+    speaker.close()
+
+    assert print_.adapted == 0
+
+
+def test_learning_is_rate_limited_so_the_file_is_not_rewritten_constantly():
+    conv, _, _, _, speaker, _ = build()
+    print_ = StubVoicePrint("match", 0.52, match_threshold=0.5)
+    conv.voiceprint = print_
+    _score_many(conv, 8)
+    speaker.close()
+
+    assert print_.adapted == 1
+
+
+def test_an_uncalibrated_profile_is_never_learned_into():
+    """Adding clips to a profile whose bar was never measured compounds a guess."""
+    conv, _, _, _, speaker, _ = build()
+    print_ = StubVoicePrint("match", 0.52, calibrated=False, match_threshold=0.5)
+    conv.voiceprint = print_
+    conv._is_the_right_voice(audio())
+    speaker.close()
+
+    assert print_.adapted == 0

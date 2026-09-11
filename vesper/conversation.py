@@ -81,6 +81,15 @@ AUTH_NAG_S = 300.0
 # and the counting happens in the audio callback where nothing else may.
 OVERFLOW_REPORT_S = 60.0
 
+# How often a confirmed utterance may be folded into the voice profile. Each one
+# rewrites the file, and the point is to track a microphone and a room as they
+# drift over weeks, not to rewrite the profile every time somebody talks.
+VOICE_LEARN_EVERY_S = 120.0
+
+# How many scored utterances to see before concluding that a profile which has
+# never matched is broken rather than unlucky. The real failure ran to 279.
+VOICE_DOUBT_AFTER = 20
+
 # Handled locally, never sent to Claude. Telling something to be quiet should
 # not require a network round trip, and must work while it is mid-sentence.
 _MUTE_PHRASES = (
@@ -318,6 +327,13 @@ class Conversation:
         # The last thing asked, to notice it being asked again.
         self._last_asked = ""
         self.voice_rejections = 0
+        # Whether the voice profile is doing its job, which went unasked for
+        # eleven days while it rejected its owner 266 times and matched nobody.
+        # Counted rather than inferred, so `status()` and the log can say so.
+        self.voice_scored = 0
+        self.voice_matches = 0
+        self._warned_about_voice = False
+        self._adapted_at = 0.0
         self._paused = False
         self._started_at = time.monotonic()
         self._last_heard = ""
@@ -473,6 +489,10 @@ class Conversation:
             "errors": self.errors,
             "locked_out": self._locked_out,
             "voice_rejections": self.voice_rejections,
+            # Both halves, because a rejection count on its own cannot tell a
+            # profile that is guarding you from one that is ignoring you.
+            "voice_scored": self.voice_scored,
+            "voice_matches": self.voice_matches,
             "echo_rejections": self.echo_rejections,
             "last_heard": self._last_heard,
             # Read live rather than from `_awake`, which only moves when audio
@@ -800,16 +820,61 @@ class Conversation:
 
         verdict, score = self.voiceprint.compare(audio)
         self._voice_confirmed = verdict == voiceprint.MATCH
+        self.voice_scored += 1
+        if verdict == voiceprint.MATCH:
+            self.voice_matches += 1
+            self._learn_this_voice(audio, score)
         if verdict == voiceprint.DIFFERENT:
             self.voice_rejections += 1
             self.ui.discarded(f"not your voice ({score:.2f})")
             self.ui.info(f"ignored an utterance, voice score {score:.2f}")
+            self._maybe_warn_about_voice()
             return False
         if verdict == voiceprint.UNSURE:
             # Answered anyway, per your choice, but written down so the
             # question "is this threshold right for my room" has real data.
             self.ui.info(f"unsure it was you, voice score {score:.2f}, answering anyway")
+            self._maybe_warn_about_voice()
         return True
+
+    def _learn_this_voice(self, audio: np.ndarray, score: float) -> None:
+        """Fold a confirmed utterance into the profile, occasionally.
+
+        Only on a match, so the profile can never be talked into accepting a new
+        voice, and only when the match was not already comfortable, because a
+        clip that scored 0.9 teaches the profile nothing it does not know. Rate
+        limited because each one writes the file, and a profile that rewrote
+        itself thirty times a minute would be a different kind of bug.
+        """
+        if self.voiceprint is None or not self.voiceprint.profile.calibrated:
+            return
+        comfortable = self.voiceprint.profile.match_threshold + 0.15
+        if score >= comfortable:
+            return
+        now = time.monotonic()
+        if now - self._adapted_at < VOICE_LEARN_EVERY_S:
+            return
+        self._adapted_at = now
+        if self.voiceprint.adapt(audio):
+            self.ui.info(f"learned a little more of your voice ({score:.2f})")
+
+    def _maybe_warn_about_voice(self) -> None:
+        """Say once, out loud in the log, that the profile is not working.
+
+        The original failure was not that the threshold was wrong. It was that
+        being wrong looked exactly like being right: 279 utterances scored, zero
+        matches, and nothing anywhere said so. One line after enough evidence is
+        the whole fix for that.
+        """
+        if self._warned_about_voice or self.voice_scored < VOICE_DOUBT_AFTER:
+            return
+        if self.voice_matches:
+            return
+        self._warned_about_voice = True
+        self.ui.warn(
+            f"the voice profile has not matched you once in {self.voice_scored} "
+            f"utterances. Run --voicecheck: it may be ignoring you."
+        )
 
     def _repeats_the_last_question(self, text: str) -> bool:
         """Was that more or less the same thing again?
