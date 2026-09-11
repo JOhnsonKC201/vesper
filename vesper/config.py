@@ -116,6 +116,18 @@ class BrainSettings:
     # gives you the spoken yes-or-no. `auto` is the CLI default and lets file
     # writes under the working directory happen with no announcement at all.
     permission_mode: str = "manual"
+    # Where the thinking happens. `cloud` is the subscription, `local` is a model
+    # server on this machine, and `auto` uses the subscription when the login
+    # check says it can and falls back to this machine when it cannot, which
+    # covers a plane, a dead router and an expired login with one setting.
+    #
+    # Offline costs capability, and pretending otherwise would be the dishonest
+    # part: the local model here is 3B against opus. It is fine at "what is using
+    # my memory" and weak at judgement, so the consent gate matters more offline,
+    # not less. It is not relaxed anywhere.
+    provider: str = "auto"
+    local_host: str = "localhost:11434"
+    local_model: str = "vesper-local:3b"
     turn_timeout_s: float = 180.0
     # Resume the previous conversation on startup, so Vesper remembers
     # yesterday. Bounded, because a resumed session carries its whole history.

@@ -424,6 +424,13 @@ class Conversation:
         the typed modes, so `--say` on a dead login says so as well.
         """
         if self.brain.auth_status() is False:
+            # Not reachable is not the same as not working. Under `auto` this is
+            # exactly the case offline mode exists for: a plane, a dead router, a
+            # login that expired overnight. Falling back here rather than locking
+            # out is the difference between an assistant that is unavailable and
+            # one that is merely less clever for a while.
+            if self._fall_back_to_local():
+                return
             self.ui.error(
                 "claude is not logged in on this machine; the brain was not started"
             )
@@ -432,6 +439,28 @@ class Conversation:
             return
         # resume, so a stored session id from a previous launch is actually used
         self.brain.start(resume=bool(self.brain.session_id))
+
+    def _fall_back_to_local(self) -> bool:
+        """Move the brain onto this machine and start it. Returns whether it did.
+
+        Deliberately quiet about capability. It says which brain is answering,
+        because a 3B model answering as though it were opus would be the
+        confusing version, and then gets on with it.
+        """
+        if self.brain.local or not self.brain.may_fall_back:
+            return False
+        if not self.brain.use_local(True):
+            return False
+        self.ui.warn("claude is not reachable, so I'm thinking on this machine")
+        # Never resumed: the session id, if any, belongs to the other provider.
+        self.brain.start(resume=False)
+        if not self.brain.alive:
+            # The local server is not there either. Back to the lockout path,
+            # which at least says something true about the login.
+            self.brain.use_local(False)
+            return False
+        self._locked_out = False
+        return True
 
     def stop(self) -> None:
         self._running.clear()
@@ -1468,6 +1497,11 @@ class Conversation:
         the renewed credentials.
         """
         if self.brain.auth_status() is False:
+            # Same call as at startup: under `auto`, a login that is still dead
+            # is a reason to answer from this machine rather than a reason to
+            # keep saying no. The lockout lifts inside `_fall_back_to_local`.
+            if self._fall_back_to_local():
+                return True
             self.register.note_failure()
             self.errors += 1
             self.ui.error("still not logged in; nothing was sent to the brain")

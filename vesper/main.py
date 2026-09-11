@@ -193,6 +193,13 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
             add_dirs=tuple(cfg.brain.add_dirs),
             turn_timeout_s=cfg.brain.turn_timeout_s,
             permission_mode=cfg.brain.permission_mode,
+            provider=cfg.brain.provider,
+            local_host=cfg.brain.local_host,
+            local_model=cfg.brain.local_model,
+            # `local` starts false whatever the preference is. With `auto` the
+            # startup login check decides, and with `local` the line below does.
+            # Neither is knowable here, where nothing has been asked yet.
+            local=cfg.brain.provider.strip().lower() == "local",
         ),
         # With -v the brain's lines share the console. Without it they still
         # go to the file, tagged BRAIN: on 2026-09-04 the child failed every
