@@ -340,11 +340,10 @@ class Conversation:
         self.register = register.Register()
         # The last thing asked, to notice it being asked again.
         self._last_asked = ""
-        # A prefix transcribed while the endpointer was still waiting out the
-        # end-of-speech silence, and the event that says the worker has finished.
-        # Both are cleared by `_transcript_for` as it collects them.
-        self._early_ready: threading.Event | None = None
-        self._early_transcript = None
+        # A prefix being transcribed while the endpointer waits out the rest of
+        # the end-of-speech silence, held as (event, holder) and cleared by
+        # `_transcript_for` as it collects. None means nothing is in flight.
+        self._early: tuple | None = None
         # One decode at a time. The speculative worker and the audio loop can
         # both want the transcriber, and whisper models are not reentrant.
         self._stt_lock = threading.Lock()
@@ -726,17 +725,24 @@ class Conversation:
         starts a thread and returns. `_transcript_for` collects the result, and
         throws it away if more was said after the prefix was taken.
         """
-        self._early_ready = threading.Event()
-        self._early_transcript = None
+        ready = threading.Event()
+        # The worker writes into this dict rather than onto self, so the result
+        # cannot be read before it exists. The first version kept it in an
+        # attribute that the collector snapshotted before waiting, which meant a
+        # worker still running at collection time had its result discarded after
+        # being waited for: the slow decode was paid twice, on exactly the slow
+        # machines this was built to help.
+        holder: dict = {}
+        self._early = (ready, holder)
 
         def work() -> None:
             try:
                 with self._stt_lock:
-                    self._early_transcript = self.stt.transcribe(audio)
+                    holder["transcript"] = self.stt.transcribe(audio)
             except Exception as exc:  # a speculative transcript, so never fatal
                 self.ui.info(f"early transcription failed: {exc}")
             finally:
-                self._early_ready.set()
+                ready.set()
 
         threading.Thread(target=work, daemon=True, name="vesper-early-stt").start()
 
@@ -748,16 +754,20 @@ class Conversation:
         utterance and its transcript the real one. Otherwise it is discarded and
         the full audio is transcribed, which is exactly what used to happen.
         """
-        ready, early = self._early_ready, self._early_transcript
-        self._early_ready, self._early_transcript = None, None
+        pending, self._early = self._early, None
 
-        if ready is not None and self.endpointer.peek_was_final:
+        if pending is not None and self.endpointer.peek_was_final:
+            ready, holder = pending
             # Waiting is never slower than starting over: this began earlier, on
             # the same audio. The bound is only there so a wedged worker cannot
             # hang the loop, and the serialising lock below means the fallback
             # cannot then run a second decode alongside it.
             if ready.wait(self.config.early_transcribe_wait_s):
-                if self._early_or_none(early) is not None:
+                # Read after the wait, not before it. Reading first was the bug:
+                # a worker that had not finished yet was waited for and then had
+                # its answer thrown away unread.
+                early = self._early_or_none(holder.get("transcript"))
+                if early is not None:
                     self.ui.thinking("transcribed while you paused")
                     return early
         with self._stt_lock:
@@ -1840,6 +1850,17 @@ class Conversation:
                         if fallback:
                             spoke_at = spoke_at or time.monotonic()
                             last_spoken = fallback
+                            # Claimed before speaking, under the same lock the
+                            # timer uses. This path speaks without going through
+                            # say_sentence, so it used to leave `spoken_anything`
+                            # false: a holding phrase whose deadline landed here
+                            # saw a turn that had said nothing, and offered to
+                            # look into a question already answered. Timer.cancel
+                            # cannot help, since it cannot stop a callback that
+                            # has already begun.
+                            with filler_lock:
+                                spoken_anything = True
+                                filler["said"] = True
                             self._say(fallback)
 
                     self.register.note_success()

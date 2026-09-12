@@ -925,3 +925,88 @@ def test_no_prefix_means_the_ordinary_path():
 
     assert transcript.text == "Vesper, what time is it"
     assert stt.calls == 1
+
+
+# --- two bugs the speed work shipped with -----------------------------------
+
+
+def test_a_slow_prefix_is_waited_for_and_then_actually_used():
+    """Both bugs in one sentence: it waited, then threw the answer away.
+
+    The collector snapshotted the result before waiting for it, so a worker that
+    had not finished yet was waited on and then ignored, and the full audio was
+    decoded again. That is two decodes on exactly the slow machines the early
+    look was built to help.
+    """
+    conv, _, stt, _, speaker, _ = build(
+        replies=["Two."], transcripts=["Vesper, what is one plus one"]
+    )
+    real = stt.transcribe
+
+    def slow(audio, sample_rate=16000):
+        time.sleep(0.25)
+        return real(audio, sample_rate)
+
+    stt.transcribe = slow
+    conv._start_early_transcription(audio())
+    conv.endpointer.peek_was_final = True
+    transcript = conv._transcript_for(audio())  # collects before the worker ends
+    speaker.close()
+
+    assert transcript.text == "Vesper, what is one plus one"
+    assert stt.calls == 1, f"decoded {stt.calls} times, so the wait bought nothing"
+
+
+def test_an_answer_with_no_streaming_deltas_silences_the_holding_phrase(monkeypatch):
+    """The fallback reply path speaks without going through say_sentence, so it
+    left `spoken_anything` false. A holding phrase whose deadline landed there
+    then offered to look into a question that had just been answered.
+
+    Timer.cancel cannot close this, because it cannot stop a callback that has
+    already begun, so the guard the callback reads has to be accurate instead.
+    The timer is replaced here rather than raced: the callback is captured, the
+    turn is run to completion, and only then is it fired, which is the exact
+    ordering the bug needs and the one a sleep cannot pin down.
+    """
+    fired = []
+
+    class CapturedTimer:
+        def __init__(self, interval, function):
+            self.function = function
+            fired.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(conversation_module.threading, "Timer", CapturedTimer)
+
+    conv, _, _, voice, speaker, _ = build()
+
+    class NoDeltaBrain(FakeBrain):
+        def ask(self, payload):
+            from vesper.brain.protocol import TurnComplete
+
+            self.asked.append(payload)
+            yield TurnComplete(
+                text="It is half past two.", is_error=False, api_error="",
+                cost_usd=0.0, duration_ms=1, session_id="fake-session",
+            )
+
+    conv.brain = NoDeltaBrain()
+    conv.config.quick_filler_after_s = 0.1
+    conv.respond("what time is it")
+    settle(speaker)
+    assert voice.lines == ["It is half past two."], voice.lines
+
+    # The deadline arrives late, after the answer is already out.
+    assert fired, "no holding-phrase timer was ever created"
+    fired[0].function()
+    settle(speaker)
+    speaker.close()
+
+    assert voice.lines == ["It is half past two."], (
+        "a holding phrase spoke after the answer it was meant to cover"
+    )
