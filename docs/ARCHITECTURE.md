@@ -9,7 +9,7 @@ For usage, see the README.
 
 The requirement was "use Claude Code, not the API". That is not a limitation to
 work around; it is the whole design. `claude` is a native binary at
-`C:\Users\johns\.local\bin\claude.exe`, and it speaks a bidirectional
+`C:\Users\you\.local\bin\claude.exe`, and it speaks a bidirectional
 newline-delimited JSON protocol:
 
 ```

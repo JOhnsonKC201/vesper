@@ -187,7 +187,7 @@ def test_a_web_address_is_recognised(said, address):
 
 @pytest.mark.parametrize("said", [
     "chrome", "notepad", "visual studio code", "Google Chrome",
-    "file:///C:/Users/johns/secrets.txt", "javascript:alert(1)", "ftp://x.y",
+    "file:///C:/Users/you/secrets.txt", "javascript:alert(1)", "ftp://x.y",
     "", "   ", "calendar google com", "my notes.txt",
 ])
 def test_an_app_name_or_an_unsafe_scheme_is_not_a_web_address(said):

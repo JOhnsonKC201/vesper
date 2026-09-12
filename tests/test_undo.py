@@ -286,8 +286,8 @@ def test_undo_with_copies_switched_off_says_so(tmp_path):
 
 def test_a_native_windows_path_survives_parsing(tmp_path):
     r"""The worst bug this project has had. shlex in posix mode treats a
-    backslash as an escape, so `del C:\Users\johns\notes.txt` came apart as
-    `C:Usersjohnsnotes.txt`. That path does not exist, so the file was recorded
+    backslash as an escape, so `del C:\Users\you\notes.txt` came apart as
+    `C:Usersyounotes.txt`. That path does not exist, so the file was recorded
     as one that had never existed, the real file was deleted, and undo then
     reported success while the original was gone for good."""
     target = tmp_path / "notes.txt"
