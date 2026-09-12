@@ -342,3 +342,35 @@ def test_a_brain_error_online_is_unchanged():
     speaker.close()
 
     assert any("Claude" in line for line in voice.lines), voice.lines
+
+
+# --- the switch has to actually take effect ---------------------------------
+#
+# Found in review, and it was the bad one. Switching provider set a flag and
+# called start(), but start() returns early when a process is already alive, so
+# a fallback that happened mid conversation left the ORIGINAL cloud-pointed
+# child running. The base URL lives in that child's environment, so the next
+# turn went to Anthropic while everything on screen said otherwise. That is the
+# exact outcome offline mode exists to prevent, reached by the path the feature
+# was written for: a login that dies while you are talking.
+
+
+def test_switching_back_stops_it_too():
+    from vesper.brain.claude import BrainConfig, ClaudeBrain
+
+    brain = ClaudeBrain(BrainConfig(provider="auto", local=True))
+    stopped = []
+    brain.stop = lambda *a, **k: stopped.append(True)
+    assert brain.use_local(False) is True
+    assert stopped, "switching back left the local child running"
+
+
+def test_a_switch_that_changes_nothing_leaves_the_process_alone():
+    """Only a real change tears down a working brain."""
+    from vesper.brain.claude import BrainConfig, ClaudeBrain
+
+    brain = ClaudeBrain(BrainConfig(provider="auto", local=False))
+    stopped = []
+    brain.stop = lambda *a, **k: stopped.append(True)
+    assert brain.use_local(False) is False
+    assert not stopped

@@ -561,3 +561,25 @@ def test_a_timed_out_turn_says_something_a_person_would_say():
         spoken = failures.spoken_break(internal)
         assert spoken == "I lost my connection to Claude. Give me a moment and ask me again."
         assert "\\" not in spoken and "/" not in spoken, "a path was about to be read aloud"
+
+
+def test_switching_provider_stops_the_process_carrying_the_old_environment(brain_factory):
+    """Found in review, and it was the bad one.
+
+    Switching provider set a flag and called start(), but start() returns early
+    when a process is already alive, so a fallback that happened mid
+    conversation left the ORIGINAL cloud-pointed child running. The base URL
+    lives in that child's environment, so the next turn went to Anthropic while
+    everything on screen said it was running on this machine. That is the exact
+    outcome offline mode exists to prevent, reached by the path the feature was
+    written for: a login that dies while you are talking.
+    """
+    brain = brain_factory(replies=["ok"])
+    brain.start()
+    assert brain.alive, "the fake brain never started"
+
+    assert brain.use_local(True) is True
+    assert not brain.alive, (
+        "the old child survived the switch, so it still holds the old "
+        "ANTHROPIC_BASE_URL and the next turn leaves this machine"
+    )

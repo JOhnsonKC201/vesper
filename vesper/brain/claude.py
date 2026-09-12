@@ -275,6 +275,18 @@ class ClaudeBrain:
         if bool(self.config.local) == bool(local):
             return False
         self.config.local = bool(local)
+        # Tearing the child down is the switch. The base URL, the auth token and
+        # the blanked API key are all environment, and environment is fixed at
+        # spawn, so a running process cannot be moved between providers.
+        #
+        # This used to be left to the caller, which read as a tidy division of
+        # labour and was a hole: `start()` returns early when a process is
+        # already alive, so a fallback part way through a conversation flipped
+        # the flag, called start(), got a no-op, and carried on feeding the
+        # ORIGINAL cloud-pointed child. Everything on screen said "thinking on
+        # this machine" while the turn went to Anthropic, which is the one thing
+        # offline mode exists to prevent, down the exact path it was built for.
+        self.stop()
         # A session id belongs to the server that issued it. Resuming a cloud
         # conversation against the local server, or the reverse, asks for a
         # transcript that machine has never seen, and the CLI fails the turn
