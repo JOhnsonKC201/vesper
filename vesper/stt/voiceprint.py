@@ -117,6 +117,12 @@ MATCH_FLOOR = 0.35
 # symmetric: answering a stranger once is a curiosity, and ignoring your owner is
 # the whole feature failing. This is the gap kept below the match bar.
 REJECT_GAP = 0.18
+# A backstop, and with the constants above it cannot currently bind: the match
+# bar never goes below MATCH_FLOOR, so the rejection bar never goes below 0.17.
+# Kept rather than deleted because it is the thing that stops a future change to
+# MATCH_FLOOR or REJECT_GAP producing a rejection bar at or below zero, where
+# every voice on earth would be "clearly different" from you. Said plainly here
+# so nobody reads it as live tuning and adjusts it expecting an effect.
 REJECT_FLOOR = 0.08
 
 # How many clips a profile may hold. Enrolment contributes a handful and `adapt`
