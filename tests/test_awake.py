@@ -749,3 +749,100 @@ def test_a_small_pool_still_yields_a_filler():
     speaker.close()
     for _ in range(6):
         assert conversation._filler(("A.", "B.")) in ("A.", "B.")
+
+
+# --- the tray icon handles ---------------------------------------------------
+
+
+def test_the_same_state_does_not_reload_its_icon(monkeypatch, tmp_path):
+    """A fresh handle on every update, and none ever freed.
+
+    LoadImage without LR_SHARED hands back a handle the caller owns and must
+    destroy. `_refresh` runs on every tray update, and update fires on every
+    wake and every sleep, so an active day leaked one handle per transition.
+    Only three states exist, so loading each once is both the fix and one fewer
+    disk read per wake.
+    """
+    import sys
+    import types
+
+    from vesper.ui import tray as tray_module
+
+    loaded, destroyed = [], []
+    monkeypatch.setitem(sys.modules, "win32con", types.SimpleNamespace(
+        IMAGE_ICON=1, LR_LOADFROMFILE=0x10, LR_DEFAULTSIZE=0x40,
+        IDI_APPLICATION=32512, IDI_HAND=32513,
+    ))
+    monkeypatch.setitem(sys.modules, "win32gui", types.SimpleNamespace(
+        LoadImage=lambda *a, **k: (loaded.append(1), len(loaded))[1],
+        LoadIcon=lambda *a, **k: 0,
+        DestroyIcon=lambda handle: destroyed.append(handle),
+    ))
+
+    icon = tmp_path / "listening.ico"
+    icon.write_bytes(b"\x00")
+    tray = tray_module.TrayIcon(icons={"listening": icon})
+
+    for _ in range(3):
+        tray._icon_handle()
+    assert loaded == [1], f"loaded the same icon {len(loaded)} times"
+
+    tray.destroy_icons()
+    assert destroyed == [1], "a handle we owned was never freed"
+
+
+def test_freeing_the_icons_twice_is_harmless(monkeypatch, tmp_path):
+    """Shutdown can arrive by more than one route, so this must not double free."""
+    import sys
+    import types
+
+    from vesper.ui import tray as tray_module
+
+    destroyed = []
+    monkeypatch.setitem(sys.modules, "win32con", types.SimpleNamespace(
+        IMAGE_ICON=1, LR_LOADFROMFILE=0x10, LR_DEFAULTSIZE=0x40,
+        IDI_APPLICATION=32512, IDI_HAND=32513,
+    ))
+    monkeypatch.setitem(sys.modules, "win32gui", types.SimpleNamespace(
+        LoadImage=lambda *a, **k: 7,
+        LoadIcon=lambda *a, **k: 0,
+        DestroyIcon=lambda handle: destroyed.append(handle),
+    ))
+
+    icon = tmp_path / "listening.ico"
+    icon.write_bytes(b"\x00")
+    tray = tray_module.TrayIcon(icons={"listening": icon})
+    tray._icon_handle()
+
+    tray.destroy_icons()
+    tray.destroy_icons()
+    assert destroyed == [7]
+
+
+def test_a_stock_icon_is_never_freed(monkeypatch):
+    """LoadIcon from a null module is a shared system resource Windows owns.
+
+    Passing one to DestroyIcon would be the wrong fix, so nothing without a
+    configured icon file may end up in the cache at all.
+    """
+    import sys
+    import types
+
+    from vesper.ui import tray as tray_module
+
+    destroyed = []
+    monkeypatch.setitem(sys.modules, "win32con", types.SimpleNamespace(
+        IMAGE_ICON=1, LR_LOADFROMFILE=0x10, LR_DEFAULTSIZE=0x40,
+        IDI_APPLICATION=32512, IDI_HAND=32513,
+    ))
+    monkeypatch.setitem(sys.modules, "win32gui", types.SimpleNamespace(
+        LoadImage=lambda *a, **k: 0,
+        LoadIcon=lambda *a, **k: 999,
+        DestroyIcon=lambda handle: destroyed.append(handle),
+    ))
+
+    tray = tray_module.TrayIcon(icons={})
+    assert tray._icon_handle() == 999
+
+    tray.destroy_icons()
+    assert destroyed == [], "a shared system icon was passed to DestroyIcon"

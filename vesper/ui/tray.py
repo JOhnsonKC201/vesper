@@ -80,6 +80,9 @@ class TrayIcon:
         self._on_open_log = on_open_log or (lambda: None)
         self._on_dashboard = on_dashboard or (lambda: None)
         self._icons = icons or {}
+        # One handle per state, loaded once. See `_icon_handle`: an icon loaded
+        # from a file is ours to own and ours to free, and it was neither.
+        self._icon_handles: dict[str, int] = {}
         self._log = log
         self._thread: threading.Thread | None = None
         self._hwnd = None
@@ -194,7 +197,12 @@ class TrayIcon:
         import win32con
         import win32gui
 
-        path = self._icons.get(self.icon_state())
+        state = self.icon_state()
+        cached = self._icon_handles.get(state)
+        if cached:
+            return cached
+
+        path = self._icons.get(state)
         if path is not None:
             try:
                 handle = win32gui.LoadImage(
@@ -202,11 +210,37 @@ class TrayIcon:
                     win32con.LR_LOADFROMFILE | win32con.LR_DEFAULTSIZE,
                 )
                 if handle:
+                    # LR_SHARED is deliberately absent, which makes this handle
+                    # ours to own and ours to free. It was neither: a new one was
+                    # loaded on every tray update and none was ever destroyed, so
+                    # a day of waking and sleeping leaked one handle per
+                    # transition. Only three states exist, so caching them is the
+                    # fix and also stops the .ico being re-read from disk.
+                    self._icon_handles[state] = handle
                     return handle
             except Exception:
                 pass
+        # Loaded from a null module, so this one is a shared system resource that
+        # Windows owns. It must never be passed to DestroyIcon, which is exactly
+        # why it is not kept alongside the others.
         which = win32con.IDI_APPLICATION if self.state.listening else win32con.IDI_HAND
         return win32gui.LoadIcon(0, which)
+
+    def destroy_icons(self) -> None:
+        """Free every icon handle loaded from a file. Safe to call twice."""
+        if not self._icon_handles:
+            return
+        try:
+            import win32gui
+        except ImportError:
+            self._icon_handles.clear()
+            return
+        for handle in self._icon_handles.values():
+            try:
+                win32gui.DestroyIcon(handle)
+            except Exception:
+                pass
+        self._icon_handles.clear()
 
     def _notify(self, action: int) -> None:
         import win32gui
@@ -292,6 +326,8 @@ class TrayIcon:
     def _on_destroy(self, hwnd, msg, wparam, lparam):
         import win32gui
 
+        # The window is going away, so the icons it was drawing with can go too.
+        self.destroy_icons()
         win32gui.PostQuitMessage(0)
         return 0
 
