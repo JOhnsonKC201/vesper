@@ -65,7 +65,7 @@ from .brain.protocol import (
 from .brain.sentences import SentenceAssembler
 from .sensors import snapshot as sensors
 from .stt import voiceprint
-from .stt.whisper import Listener
+from .stt.whisper import Listener, Transcript
 from .undo import UndoStore
 from .wake import WakeGate
 
@@ -793,8 +793,34 @@ class Conversation:
                 if early is not None:
                     self.ui.thinking("transcribed while you paused")
                     return early
-        with self._stt_lock:
+        return self._transcribe_now(audio)
+
+    def _transcribe_now(self, audio: np.ndarray):
+        """Decode the whole utterance, without letting the audio loop hang.
+
+        The lock is taken with a deadline rather than waited on forever. This
+        runs on the only thread reading the microphone, and the worker it can
+        collide with is a speculative decode that is no longer wanted: you
+        paused, it started, you carried on talking, and its answer is now a
+        prefix of a sentence nobody asked about.
+
+        Waiting for that unbounded was the bug. The comment on the wait above
+        claimed a wedged worker could not hang the loop, and it was only ever
+        true of the wait, not of the lock immediately after it. The microphone
+        queue holds about 7.7 seconds; past that the callback drops the oldest
+        audio, so a slow decode stopped being latency and started being lost
+        speech, on exactly the slow machines this was written to help.
+
+        Giving up costs one utterance and says so. That is a far better failure
+        than a loop that stops reading.
+        """
+        if not self._stt_lock.acquire(timeout=self.config.early_transcribe_wait_s):
+            self.ui.warn("the transcriber is still busy; dropped one utterance")
+            return Transcript(text="", rejected_reason="transcriber-busy")
+        try:
             return self.stt.transcribe(audio)
+        finally:
+            self._stt_lock.release()
 
     @staticmethod
     def _early_or_none(transcript):

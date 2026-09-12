@@ -15,6 +15,7 @@ from vesper.audio.speaker import Speaker
 from vesper.audio.vad import EndpointConfig
 from vesper import conversation as conversation_module
 from vesper.conversation import Conversation, ConversationConfig
+from vesper.stt.whisper import Transcript
 from vesper.wake import WakeConfig, WakeGate
 
 from conftest import FakeBrain, FakeMic, FakeSTT, FakeVoice, RecordingUI
@@ -1010,3 +1011,42 @@ def test_an_answer_with_no_streaming_deltas_silences_the_holding_phrase(monkeypa
     assert voice.lines == ["It is half past two."], (
         "a holding phrase spoke after the answer it was meant to cover"
     )
+
+
+def test_a_superseded_prefix_does_not_stall_the_audio_loop():
+    """You paused, it started decoding, you carried on talking.
+
+    The speculative answer is now a prefix of a sentence nobody asked about, and
+    the full decode has to queue behind it. Waiting for that unbounded was the
+    bug: this runs on the only thread reading the microphone, whose queue holds
+    about 7.7 seconds before the callback starts dropping the oldest audio. A
+    slow decode stopped being latency and became lost speech.
+    """
+    conv, _, stt, _, speaker, ui = build(
+        replies=["Two."], transcripts=["Vesper, what is one plus one"]
+    )
+    conv.config.early_transcribe_wait_s = 0.2
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def wedged(audio, sample_rate=16000):
+        started.set()
+        release.wait(5.0)
+        return Transcript(text="prefix")
+
+    stt.transcribe = wedged
+    conv._start_early_transcription(audio())
+    assert started.wait(2.0), "the speculative worker never began"
+    conv.endpointer.peek_was_final = False  # you kept talking
+
+    began = time.monotonic()
+    transcript = conv._transcript_for(audio())
+    waited = time.monotonic() - began
+    release.set()
+    speaker.close()
+
+    assert waited < 2.0, f"the audio loop was blocked for {waited:.1f}s"
+    assert not transcript.ok
+    assert "busy" in (transcript.rejected_reason or "")
+    assert any("dropped one utterance" in w for w in ui.warnings), ui.warnings
