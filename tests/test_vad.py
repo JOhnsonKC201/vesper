@@ -153,19 +153,69 @@ def test_a_brief_blip_is_discarded(speech):
     assert run_endpointer(audio) == []
 
 
-def test_preroll_is_prepended_so_the_first_word_survives(speech):
-    endpointer = Endpointer(VoiceActivity())
-    preroll = np.full(6400, 0.02, dtype=np.float32)  # 400ms marker
-    captured = None
-    for block in blocks(np.concatenate([speech, silence(1.5)])):
-        result = endpointer.feed(block, preroll=preroll)
+def contiguous_offset(stream: np.ndarray, piece: np.ndarray) -> int | None:
+    """Where `piece` sits verbatim inside `stream`, or None if it never does.
+
+    Utterances always open on a block boundary, so only those offsets are worth
+    testing. Handing a static filler in as the lead-in, which is what the old
+    version of the test below did, cannot detect a repeat: filler has nothing
+    in common with the audio that gets repeated.
+    """
+    for start in range(0, len(stream) - len(piece) + 1, BLOCK):
+        if np.array_equal(stream[start : start + len(piece)], piece):
+            return start
+    return None
+
+
+def capture_one(stream: np.ndarray, config: EndpointConfig | None = None):
+    endpointer = Endpointer(VoiceActivity(), config)
+    for block in blocks(stream):
+        result = endpointer.feed(block)
         if result is not None:
-            captured = result
-            break
+            return result
+    return None
+
+
+def test_an_utterance_is_a_verbatim_run_of_what_was_fed(speech):
+    """No sample may be repeated, dropped or reordered on the way out.
+
+    The lead-in used to be read from the microphone's own ring, which is
+    appended on every captured block whether it is speech or not. By the time
+    an utterance was confirmed that ring's tail held the same audio as the
+    candidate blocks, and feed() concatenated both. Every utterance, and every
+    enrolment clip, opened with its first 120ms played twice. A duplicated
+    onset is not a contiguous run, so this is the guard against its return.
+    """
+    stream = np.concatenate([silence(0.8), speech, silence(1.5)])
+    captured = capture_one(stream)
     assert captured is not None
-    assert len(captured) > len(speech) * 0.9
-    # The marker value must appear at the very front of the utterance.
-    assert np.allclose(captured[:100], 0.02)
+    assert contiguous_offset(stream, captured) is not None
+
+
+def test_the_lead_in_is_kept_so_the_first_word_survives(speech):
+    """Whole words live in the moments before the endpointer is sure."""
+    lead_in = silence(0.8)
+    stream = np.concatenate([lead_in, speech, silence(1.5)])
+    captured = capture_one(stream)
+    assert captured is not None
+    offset = contiguous_offset(stream, captured)
+    assert offset is not None
+    # It opens before the speech does, keeping real audio from before it.
+    assert offset < len(lead_in)
+    assert len(lead_in) - offset >= 0.15 * 16000
+
+
+def test_a_discarded_candidate_stays_in_the_lead_in(speech):
+    """A blip that fails to become speech is still audio that came before.
+
+    Dropping it would punch a hole in the lead-in, and the utterance would stop
+    being a verbatim run of the stream.
+    """
+    blip = speech[: int(16000 * 0.06)]
+    stream = np.concatenate([silence(0.4), blip, silence(0.3), speech, silence(1.5)])
+    captured = capture_one(stream)
+    assert captured is not None
+    assert contiguous_offset(stream, captured) is not None
 
 
 def test_max_duration_forces_a_cut(speech):

@@ -706,7 +706,7 @@ class Conversation:
 
         # The accessor, not the array. Built only when an utterance actually
         # opens, rather than 33 times a second and thrown away.
-        utterance = self.endpointer.feed(block, preroll=self.mic.preroll)
+        utterance = self.endpointer.feed(block)
         if utterance is not None:
             self._on_utterance(utterance)
             return

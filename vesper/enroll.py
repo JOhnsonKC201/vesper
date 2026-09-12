@@ -125,7 +125,7 @@ def _record_one(mic: Microphone, endpointer: Endpointer, timeout: float = 20.0):
         block = mic.read(timeout=0.5)
         if block is None:
             continue
-        utterance = endpointer.feed(block, preroll=mic.preroll)
+        utterance = endpointer.feed(block)
         if utterance is not None:
             if utterance.size < int(MIN_SECONDS * 16000):
                 return None

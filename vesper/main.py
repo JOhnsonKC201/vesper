@@ -354,6 +354,9 @@ def _start_tray(cfg: config_module.Config, conversation, ui):
         on_toggle=conversation.pause,
         on_open_log=open_log,
         on_quit=conversation.shutdown,
+        # So a redraw that starts failing says so once, instead of freezing the
+        # window on its last good frame and leaving no trace anywhere.
+        on_error=ui.warn,
         voices=panel,
         # A second accessor rather than a field on `status`, which two tests
         # hold to scalars. Both are read from the dashboard thread and both

@@ -696,6 +696,61 @@ def test_the_dashboard_never_touches_tk_from_another_thread():
         assert ".after(" not in source, f"{name} schedules on Tk from outside"
 
 
+def test_a_dashboard_that_cannot_redraw_says_so_once():
+    """A failed redraw was swallowed whole, so the window froze on its last
+    good frame and nothing anywhere said why. Reporting every tick would be no
+    better: four times a second, the log becomes its own outage."""
+    from vesper.ui import dashboard as dashboard_module
+
+    said: list[str] = []
+
+    class Root:
+        def after(self, *_args):
+            pass
+
+    def broken_snapshot():
+        raise RuntimeError("snapshot is broken")
+
+    board = dashboard_module.Dashboard(broken_snapshot, on_error=said.append)
+    board._root = Root()
+    # Only one tick in four redraws, so eight ticks is two attempts.
+    for _ in range(8):
+        board._refresh()
+
+    assert board._apply_failures == 2, "the tick stopped running"
+    assert len(said) == 1, "it repeated itself instead of counting"
+    assert "snapshot is broken" in said[0]
+
+
+def test_a_dashboard_that_recovers_keeps_running():
+    """The failure counter must not be a latch: one bad snapshot should not
+    stop every later one from being drawn."""
+    from vesper.ui import dashboard as dashboard_module
+
+    drawn: list[dict] = []
+    fail = [True]
+
+    class Root:
+        def after(self, *_args):
+            pass
+
+    def snapshot():
+        if fail[0]:
+            raise RuntimeError("not yet")
+        return {"state": "listening"}
+
+    board = dashboard_module.Dashboard(snapshot, on_error=lambda _m: None)
+    board._root = Root()
+    board._apply = drawn.append
+    board._refresh()
+    assert board._apply_failures == 1 and drawn == []
+
+    fail[0] = False
+    for _ in range(4):
+        board._refresh()
+    assert drawn == [{"state": "listening"}]
+
+
 def test_closing_the_dashboard_waits_for_its_thread():
     """A daemon thread still holding Tk objects at process exit is the same
     wrong-thread teardown, just later."""
