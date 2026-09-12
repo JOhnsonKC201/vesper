@@ -158,7 +158,8 @@ def test_an_ordinary_error_is_not_mistaken_for_a_local_one():
 # Driven through the real Conversation, because the decision is not "is the
 # login dead" but "given a dead login, does anybody still get an answer".
 
-from tests.test_conversation import build  # noqa: E402
+from conftest import FakeBrain  # noqa: E402
+from tests.test_conversation import build, settle  # noqa: E402
 
 
 def test_a_dead_login_moves_the_brain_onto_this_machine():
@@ -235,3 +236,109 @@ def test_it_does_not_switch_twice():
     speaker.close()
 
     assert brain.local_switches == [True]
+
+
+# --- saying the true thing when the local brain is the broken part ----------
+#
+# classify_local shipped as dead code: it was written, tested in isolation, and
+# never called. So a local server that was not running produced "That didn't go
+# through on Claude's side", which is close to the opposite of the truth, and
+# sends you to check a subscription that is fine.
+
+
+class BreakingBrain(FakeBrain):
+    """Fails every turn the way the CLI does when it cannot reach its server."""
+
+    def __init__(self, message, *, as_error_frame=True):
+        super().__init__([])
+        self.message = message
+        self.as_error_frame = as_error_frame
+
+    def ask(self, payload):
+        from vesper.brain.protocol import BrainError, TurnComplete
+
+        self.asked.append(payload)
+        if self.as_error_frame:
+            yield TurnComplete(
+                text=self.message, is_error=True, api_error="", cost_usd=0.0,
+                duration_ms=1, session_id="fake-session",
+            )
+        else:
+            yield BrainError(message=self.message)
+
+
+def _breaking(message, *, local, as_error_frame=True):
+    conv, _, _, voice, speaker, ui = build()
+    brain = BreakingBrain(message, as_error_frame=as_error_frame)
+    brain.local = local
+    conv.brain = brain
+    return conv, voice, speaker, ui
+
+
+REFUSED = "connect ECONNREFUSED 127.0.0.1:11434"
+
+
+def test_a_dead_local_server_is_not_blamed_on_claude():
+    conv, voice, speaker, _ = _breaking(REFUSED, local=True)
+    conv.respond("what time is it")
+    settle(speaker)
+    speaker.close()
+
+    spoken = " ".join(voice.lines).lower()
+    assert "claude" not in spoken, voice.lines
+    assert "offline" in spoken or "this machine" in spoken, voice.lines
+
+
+def test_the_same_error_online_still_blames_the_right_side():
+    """Only a local brain reinterprets a connection error this way."""
+    conv, voice, speaker, _ = _breaking(REFUSED, local=False)
+    conv.respond("what time is it")
+    settle(speaker)
+    speaker.close()
+
+    assert any("Claude" in line for line in voice.lines), voice.lines
+
+
+def test_a_missing_local_model_says_so():
+    conv, voice, speaker, _ = _breaking(
+        "model 'vesper-local:3b' not found, try pulling it", local=True
+    )
+    conv.respond("what time is it")
+    settle(speaker)
+    speaker.close()
+
+    spoken = " ".join(voice.lines).lower()
+    assert "model" in spoken, voice.lines
+
+
+def test_an_ordinary_local_failure_keeps_the_ordinary_words():
+    """Not every offline failure is the server. Do not over-claim."""
+    conv, voice, speaker, _ = _breaking("the tool returned nothing useful", local=True)
+    conv.respond("what time is it")
+    settle(speaker)
+    speaker.close()
+
+    spoken = " ".join(voice.lines).lower()
+    assert "ollama" not in spoken, voice.lines
+
+
+def test_a_dead_local_server_reported_as_a_brain_error_also_says_so():
+    """The CLI can fail before any turn exists, and that arrives differently."""
+    conv, voice, speaker, _ = _breaking(REFUSED, local=True, as_error_frame=False)
+    conv.respond("what time is it")
+    settle(speaker)
+    speaker.close()
+
+    spoken = " ".join(voice.lines).lower()
+    assert "claude" not in spoken, voice.lines
+
+
+def test_a_brain_error_online_is_unchanged():
+    conv, voice, speaker, _ = _breaking(
+        "[WinError 232] The pipe is being closed", local=False, as_error_frame=False
+    )
+    conv.respond("what time is it")
+    settle(speaker)
+    speaker.close()
+
+    assert any("Claude" in line for line in voice.lines), voice.lines

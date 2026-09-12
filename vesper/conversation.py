@@ -952,6 +952,24 @@ class Conversation:
             self._maybe_warn_about_voice()
         return True
 
+    def _words_for_failure(self, text: str) -> str:
+        """What to say when the offline brain is the broken part, or nothing.
+
+        Returns a sentence only when this turn was running on the local model AND
+        the error is one of the two ways that server fails: not running, or not
+        holding the model. Everything else returns nothing and the caller keeps
+        the wording it already had, because the cost of over-claiming here is
+        sending somebody to restart a server that was never involved.
+
+        `failures.classify_local` existed before this and was never called, so a
+        dead local server said "That didn't go through on Claude's side" and sent
+        you to check a subscription that was working perfectly.
+        """
+        if not self.brain.local:
+            return ""
+        kind = failures.classify_local(text or "")
+        return failures.spoken_line(kind) if kind else ""
+
     def _learn_this_voice(self, audio: np.ndarray, score: float) -> None:
         """Fold a confirmed utterance into the profile, occasionally.
 
@@ -1625,7 +1643,11 @@ class Conversation:
         detail = event.error_subtype or event.api_error or "error"
         self.ui.error(f"brain turn failed ({kind}, {detail}): {event.text}")
         if kind != failures.AUTH:
-            self._say(failures.spoken_line(kind))
+            # Offline, the generic line blames the wrong machine. "That didn't go
+            # through on Claude's side" sends you to check a subscription that is
+            # fine while the thing that is actually down is on this desk.
+            self._say(self._words_for_failure(event.text)
+                      or failures.spoken_line(kind))
             return
         if not retried:
             self.brain.restart()
@@ -1782,7 +1804,8 @@ class Conversation:
                     # [WinError 232] The pipe is being closed" was read out loud.
                     self.register.note_failure()
                     self.ui.error(event.message)
-                    self._say(failures.spoken_break(event.message))
+                    self._say(self._words_for_failure(event.message)
+                              or failures.spoken_break(event.message))
                     return
 
                 elif isinstance(event, TurnComplete):
