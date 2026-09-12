@@ -9,7 +9,7 @@ For usage, see the README.
 
 The requirement was "use Claude Code, not the API". That is not a limitation to
 work around; it is the whole design. `claude` is a native binary at
-`C:\Users\johns\.local\bin\claude.exe`, and it speaks a bidirectional
+`C:\Users\you\.local\bin\claude.exe`, and it speaks a bidirectional
 newline-delimited JSON protocol:
 
 ```
@@ -93,12 +93,29 @@ From the moment you stop speaking:
 | Stage | Measured |
 |---|---|
 | Endpointer confirms silence | 700ms (`end_silence_ms`) |
-| Whisper `base.en` on CPU, 2.5s clip | 270 to 550ms |
-| Claude time to first token | ~1,500ms |
+| Whisper, during that wait | 0ms on the critical path (`early_silence_ms`) |
+| Claude time to first token | ~1,500ms, or ~1,100ms on the local model |
+| Holding phrase, if still silent | 800ms (`quick_filler_after_s`) |
 | Piper starts playing | immediate, synthesis runs at 7.3x realtime |
-| **First audible word** | **~2.3 to 2.6s** |
+| **First audible word** | **~1.5s** |
+| **First word of the answer itself** | **~2.2s** |
 
-Three things keep that number down.
+Transcription used to sit between the first two rows. It no longer does, and the
+reason is that it never needed the wait: whatever was said before a pause is
+already final. At 250ms of silence `Endpointer.peek()` hands over the utterance
+so far and a worker transcribes it while the endpointer spends the remaining
+450ms making sure you have finished. Measured on a 6.5s clip, `small.en` on the
+card takes 217ms against 448ms of silence to spend, so all 217ms disappear. Keep
+talking and `peek_was_final` comes back false, the speculative transcript is
+discarded, and the behaviour is exactly what it was.
+
+The holding phrase is the other half. It used to fire only on the first tool
+call, so a plain question, which is most of them, bought the whole time to first
+token as dead air. It now also fires on a deadline, which is why `_run_turn`
+wraps its event loop in `try/finally`: a timer outliving its turn would
+apologise for an error and then, half a second later, offer to look into it.
+
+Three more things keep that number down.
 
 **Sentence-level flushing.** `--include-partial-messages` gives text deltas as
 they generate. `brain/sentences.py` assembles them into sentences and hands each

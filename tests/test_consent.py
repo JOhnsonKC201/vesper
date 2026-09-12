@@ -93,9 +93,9 @@ def test_a_but_that_is_not_preceded_by_agreement_is_unclear():
 
 
 def test_a_file_write_is_described_by_its_name_not_its_path():
-    request = ActionRequest("Write", {"file_path": "C:/Users/johns/notes.txt"})
+    request = ActionRequest("Write", {"file_path": "C:/Users/you/notes.txt"})
     assert request.spoken().startswith("create notes dot txt")
-    assert "C:/Users/johns/notes.txt" in request.written()
+    assert "C:/Users/you/notes.txt" in request.written()
 
 
 def test_a_write_says_out_loud_that_the_grant_is_wider_than_the_file():
@@ -106,7 +106,7 @@ def test_a_write_says_out_loud_that_the_grant_is_wider_than_the_file():
     bare `Write` allows writing to a file that was never mentioned. Since the
     grant cannot be narrowed, the question is what has to widen.
     """
-    request = ActionRequest("Write", {"file_path": "C:/Users/johns/notes.txt"})
+    request = ActionRequest("Write", {"file_path": "C:/Users/you/notes.txt"})
     assert request.whole_tool is True
     assert request.grants() == ("Write",)
     assert "other files" in request.spoken()
@@ -1115,9 +1115,9 @@ def test_the_same_tool_on_a_different_file_is_flagged():
     from vesper.conversation import Conversation
 
     request = ActionRequest("Write", {"file_path": "C:/notes.txt"})
-    event = ToolStarted("Write", "C:/Users/johns/.ssh/authorized_keys")
+    event = ToolStarted("Write", "C:/Users/you/.ssh/authorized_keys")
     flagged = Conversation._unasked_use(request, event)
-    assert flagged == "Write: C:/Users/johns/.ssh/authorized_keys"
+    assert flagged == "Write: C:/Users/you/.ssh/authorized_keys"
 
 
 def test_reading_is_never_flagged_because_reading_was_never_granted():

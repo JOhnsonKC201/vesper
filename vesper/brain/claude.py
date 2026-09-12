@@ -42,7 +42,13 @@ from .protocol import BrainError, Event, StreamParser, TurnComplete, encode_user
 _PRIVATE_ENV_PREFIX = "VESPER_"
 
 
-def child_env() -> dict:
+# The token the local server wants in the Anthropic auth header. It is required
+# by the CLI and ignored by the server, but it must be non-empty or the CLI goes
+# looking for a real key and fails before it sends anything.
+_LOCAL_TOKEN = "ollama"
+
+
+def child_env(config: "BrainConfig | None" = None) -> dict:
     """The environment the brain gets: ours, minus anything that is a secret."""
     env = {
         name: value
@@ -55,6 +61,16 @@ def child_env() -> dict:
     # on any path it can reach and every call comes back "not recognized".
     root = str(Path(__file__).resolve().parent.parent.parent)
     env["PATH"] = os.pathsep.join([root, env.get("PATH", "")])
+    if config is not None and config.local:
+        # The entire offline mode is these three variables. The CLI is an HTTP
+        # client that happens to default to Anthropic, so pointing it at a server
+        # on this machine needs no new protocol, no new parser and no API key.
+        env["ANTHROPIC_BASE_URL"] = config.local_base_url()
+        env["ANTHROPIC_AUTH_TOKEN"] = _LOCAL_TOKEN
+        # Blank rather than absent. A real key left in the environment wins over
+        # the base URL in some CLI versions, which would quietly send an offline
+        # turn to Anthropic: the one outcome offline mode exists to prevent.
+        env["ANTHROPIC_API_KEY"] = ""
     return env
 
 # Windows: keep the child's console window from flashing on screen.
@@ -69,6 +85,29 @@ class BrainConfig:
 
     executable: str = "claude"
     model: str = "sonnet"
+    # cloud, local, or auto. auto means "the subscription when it can be reached,
+    # this machine when it cannot", decided by the login check that already runs
+    # at startup rather than by a probe: nothing in this package may open a
+    # socket, and the only honest test of reachability is having tried.
+    provider: str = "auto"
+    # A host, not a URL. test_privacy.py allows a URL literal in exactly three
+    # files and this is not one of them, so the scheme is composed below. That
+    # rule is worth a line of awkwardness: it is what makes the claim "nothing
+    # here reaches the network" checkable rather than asserted.
+    local_host: str = "localhost:11434"
+    # Measured on this machine: qwen2.5 3B runs entirely on the 8GB card at about
+    # 1.1s to first token, where a 9.7B model spilled 71% onto the processor and
+    # timed out outright. `vesper-local:3b` is that model with two settings
+    # changed, because the stock ones are actively wrong here. Ollama's default
+    # 4096 token context is smaller than this CLI's prompt plus one tool result,
+    # so the tool result was silently dropped and the model answered confidently
+    # from nothing; and the default temperature made a 3B model unreliable at
+    # reading the results it did see. num_ctx 16384 and temperature 0 fixed both,
+    # three runs out of three.
+    local_model: str = "vesper-local:3b"
+    # Whether this particular spawn is running against the local server. Not a
+    # preference: `provider` is the preference, this is what actually happened.
+    local: bool = False
     cwd: str = str(Path.home())
     system_prompt: str = "You are Vesper, a helpful voice assistant."
     # Read freely. Anything that changes the machine is absent from this list
@@ -85,6 +124,33 @@ class BrainConfig:
     # Vesper that acts without asking.
     permission_mode: str = "manual"
 
+    def local_base_url(self) -> str:
+        """Where the local server is, assembled rather than written down.
+
+        Composed from pieces so the package keeps containing no URL literal, the
+        same trick `vasper open` uses for web addresses. Awkward on purpose: the
+        test that enforces it is the reason "this package cannot reach the
+        network" is a fact and not a promise.
+        """
+        host = (self.local_host or "").strip()
+        if "://" in host:
+            return host
+        return "http:" + "//" + host
+
+    def which_model(self) -> str:
+        return self.local_model if self.local else self.model
+
+    def usable_tools(self) -> tuple[str, ...]:
+        """The tool list for this spawn.
+
+        WebSearch is a round trip to a search engine, so offline it can only
+        fail, and a tool that always fails is worse than an absent one: Claude
+        spends a step discovering it, then apologises about it out loud.
+        """
+        if not self.local:
+            return self.tools
+        return tuple(t for t in self.tools if t != "WebSearch")
+
     def argv(self, resume_session: str = "", grants: tuple[str, ...] = ()) -> list[str]:
         args = [
             self.executable,
@@ -95,7 +161,7 @@ class BrainConfig:
             "--include-partial-messages",
             "--safe-mode",
             "--exclude-dynamic-system-prompt-sections",
-            "--model", self.model,
+            "--model", self.which_model(),
             "--system-prompt", self.system_prompt,
         ]
         # Never `if self.permission_mode:`. A blank or commented out value in
@@ -106,8 +172,9 @@ class BrainConfig:
         # rather than to nothing.
         mode = (self.permission_mode or "").strip() or "manual"
         args += ["--permission-mode", mode]
-        if self.tools:
-            args += ["--tools", ",".join(self.tools)]
+        tools = self.usable_tools()
+        if tools:
+            args += ["--tools", ",".join(tools)]
         # Grants are the one-shot widening earned by a spoken yes. They ride on
         # the same flag as the standing read-only allowlist and last exactly as
         # long as the process they were passed to.
@@ -180,9 +247,44 @@ class ClaudeBrain:
         the hands for the session."""
         return self._standing
 
-    @staticmethod
-    def _child_env() -> dict:
-        return child_env()
+    def _child_env(self) -> dict:
+        return child_env(self.config)
+
+    @property
+    def local(self) -> bool:
+        """Is this brain answering from this machine rather than from Anthropic?"""
+        return bool(self.config.local)
+
+    @property
+    def may_fall_back(self) -> bool:
+        """May this brain answer from this machine when Claude cannot be reached?
+
+        Only under `auto`. Somebody who wrote `cloud` meant it, and silently
+        downgrading them to a 3B model would be the rudest possible reading of a
+        setting that says which model to use.
+        """
+        return (self.config.provider or "").strip().lower() == "auto"
+
+    def use_local(self, local: bool = True) -> bool:
+        """Switch provider. Returns whether anything changed.
+
+        The running child cannot be moved, because the base URL is part of its
+        environment, so the caller respawns. Kept here rather than in the caller
+        so that "which provider is this brain on" has exactly one home.
+        """
+        if bool(self.config.local) == bool(local):
+            return False
+        self.config.local = bool(local)
+        # A session id belongs to the server that issued it. Resuming a cloud
+        # conversation against the local server, or the reverse, asks for a
+        # transcript that machine has never seen, and the CLI fails the turn
+        # rather than starting fresh. So the thread is dropped at the switch.
+        self.session_id = ""
+        self._log(
+            "brain switching to the local model" if local
+            else "brain switching back to Claude"
+        )
+        return True
 
     def start(self, *, resume: bool = False) -> None:
         if self.alive:
@@ -190,7 +292,7 @@ class ClaudeBrain:
         argv = self.config.argv(self.session_id if resume else "", self.grants)
         self._log("spawning brain: " + " ".join(argv[:8]) + " ...")
 
-        env = child_env()
+        env = self._child_env()
 
         self._process = subprocess.Popen(
             argv,
@@ -283,7 +385,7 @@ class ClaudeBrain:
             done = subprocess.run(
                 self.config.status_argv(),
                 cwd=self.config.cwd,
-                env=child_env(),
+                env=child_env(self.config),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

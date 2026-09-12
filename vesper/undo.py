@@ -134,7 +134,7 @@ def _removal_targets(command: str) -> list[str]:
 
     Parsed with posix=False, which matters more than it looks. In posix mode
     shlex treats a backslash as an escape, so `del C:\\Users\\johns\\notes.txt`
-    came apart as `C:Usersjohnsnotes.txt`. That path does not exist, so the file
+    came apart as `C:Usersyounotes.txt`. That path does not exist, so the file
     was recorded as one that had never existed, the real file was deleted, and
     undo then reported "Put notes.txt back" while the original was gone for
     good. Silent data loss announced as success, on the ordinary Windows way of

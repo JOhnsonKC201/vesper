@@ -53,6 +53,21 @@ class FakeBrain:
         # What `claude auth status` would say. None means "could not tell".
         self.logged_in = True
         self.restarts = 0
+        # Which provider this brain is on, and whether it may change. Off by
+        # default so the existing lockout tests keep testing the lockout: a brain
+        # allowed to fall back does not lock out, which is the whole point of it.
+        self.local = False
+        self.may_fall_back = False
+        self.alive = True
+        self.local_switches: list[bool] = []
+
+    def use_local(self, local: bool = True) -> bool:
+        if bool(self.local) == bool(local):
+            return False
+        self.local = bool(local)
+        self.local_switches.append(self.local)
+        self.session_id = ""
+        return True
 
     def start(self, **kwargs):
         self.started = True

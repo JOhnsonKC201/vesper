@@ -424,7 +424,7 @@ class ActionRequest:
 
         Measured against claude 2.1.259, not assumed. `Bash(git commit:*)` is
         honoured and scopes an approval to one verb. A path scoped
-        `Write(C:/Users/johns/notes.txt)` is not honoured at all: every form
+        `Write(C:/Users/you/notes.txt)` is not honoured at all: every form
         tried, through `--allowedTools` and through `--settings`, refused even
         the file it named, while a bare `Write` allowed writing to a file that
         was never mentioned to the user. So for these tools the narrowest grant

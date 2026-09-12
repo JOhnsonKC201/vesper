@@ -743,7 +743,7 @@ verb may be granted that was not spoken.
 
 **For files it does not, and the question now says so.** This paragraph used to
 claim the property held everywhere. It does not. Measured against claude
-2.1.259: a path scoped `Write(C:/Users/johns/notes.txt)` is refused even for the
+2.1.259: a path scoped `Write(C:/Users/you/notes.txt)` is refused even for the
 file it names, through `--allowedTools` and through `--settings` alike, while a
 bare `Write` allows writing to a file that was never mentioned to the user. The
 CLI offers no finer grain than the tool, so a yes to one file is a yes to
