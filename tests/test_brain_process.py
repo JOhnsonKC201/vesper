@@ -195,8 +195,19 @@ def test_busy_is_true_during_a_turn(brain_factory):
     seen = []
 
     def watch():
-        time.sleep(0.15)
-        seen.append(brain.busy)
+        # Polled, not sampled once after a fixed sleep. The old version read
+        # `busy` exactly 150ms in and assumed the turn would still be running.
+        # On a fast CI runner it had already finished, and the test failed for a
+        # reason with nothing to do with the code under test. Watching across
+        # the whole turn asks the question this test means to ask: was it ever
+        # busy, rather than was it busy at one particular instant.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if brain.busy:
+                seen.append(True)
+                return
+            time.sleep(0.005)
+        seen.append(False)
 
     watcher = threading.Thread(target=watch)
     brain.start()
