@@ -144,6 +144,16 @@ class Profile:
 
     embedding: tuple[float, ...] = ()
     vectors: tuple[tuple[float, ...], ...] = ()
+    # How many leading entries of `vectors` came from `--enroll` rather than from
+    # `adapt`. They are the anchors: never evicted, and the only clips the
+    # thresholds are ever measured from.
+    #
+    # Without that separation, learning as it goes compounds a mistake instead of
+    # correcting one. An utterance that cleared the bar joins the profile, the
+    # bar is recalculated from the wider set, and an outlier drags the worst
+    # leave-one-out score DOWN, which lowers the bar for everyone who comes next.
+    # One lucky accept would quietly make the next one easier.
+    anchors: int = 0
     samples: int = 0
     spread: float = 0.0
     created: str = ""
@@ -180,6 +190,7 @@ class Profile:
         return {
             "embedding": list(self.embedding),
             "vectors": [list(v) for v in self.vectors],
+            "anchors": self.anchors,
             "samples": self.samples,
             "spread": self.spread,
             "created": self.created,
@@ -203,9 +214,13 @@ class Profile:
         # it always did. Nothing about an old file starts behaving differently.
         if not vectors and len(embedding) == EMBEDDING_DIM:
             vectors = (embedding,)
+        # A profile written before anchors existed has only enrolment clips in
+        # it, because adapt did not exist either, so all of them are anchors.
+        anchors = int(data.get("anchors") or 0) or len(vectors)
         return Profile(
             embedding=embedding,
             vectors=vectors,
+            anchors=min(anchors, len(vectors)),
             samples=int(data.get("samples") or 0),
             spread=float(data.get("spread") or 0.0),
             created=str(data.get("created") or ""),
@@ -451,6 +466,8 @@ class VoicePrint:
         profile = Profile(
             embedding=tuple(float(x) for x in mean),
             vectors=tuple(tuple(float(x) for x in v) for v in vectors),
+            # Everything from a deliberate enrolment is an anchor.
+            anchors=len(vectors),
             samples=len(vectors),
             spread=spread,
             created=datetime.now().isoformat(timespec="seconds"),
@@ -525,17 +542,32 @@ class VoicePrint:
         if score_against(profile, vector) <= profile.reject_threshold:
             return False
 
-        # Oldest out first, so the profile tracks the microphone as it is now
-        # rather than accumulating a decade of rooms.
-        kept = list(profile.vectors) + [tuple(float(x) for x in vector)]
-        kept = kept[-MAX_VECTORS:]
+        # The anchors stay. Only the learned tail rotates, oldest out first, so
+        # the profile tracks the microphone as it is now without ever letting go
+        # of the clips you actually sat down and recorded.
+        anchors = list(profile.vectors[: profile.anchors])
+        learned = list(profile.vectors[profile.anchors :])
+        learned.append(tuple(float(x) for x in vector))
+        room = max(MAX_VECTORS - len(anchors), 0)
+        learned = learned[-room:] if room else []
+        kept = anchors + learned
+
         arrays = [np.asarray(v, dtype=np.float32) for v in kept]
         mean = _unit(np.mean(np.vstack(arrays), axis=0))
-        match_at, reject_at = calibrate(arrays)
+        # Measured from the anchors alone. A learned clip can widen what counts
+        # as a match, because scoring takes the best of every clip, but it must
+        # never move the bar: an outlier scores badly against its peers, which
+        # would drag the worst leave-one-out score down and quietly make the
+        # NEXT acceptance easier. One lucky accept compounding into a standing
+        # invitation is the failure that separation prevents.
+        match_at, reject_at = calibrate(
+            [np.asarray(v, dtype=np.float32) for v in anchors] or arrays
+        )
 
         updated = Profile(
             embedding=tuple(float(x) for x in mean),
             vectors=tuple(kept),
+            anchors=len(anchors),
             samples=len(kept),
             spread=float(np.mean([similarity(mean, v) for v in arrays])),
             created=profile.created,

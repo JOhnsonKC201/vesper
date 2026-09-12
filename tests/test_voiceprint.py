@@ -240,3 +240,74 @@ def test_learning_is_capped_so_the_file_cannot_grow_forever(tmp_path, speaker_a)
 def test_learning_does_nothing_without_a_profile(tmp_path, speaker_a):
     store = vp.VoicePrint(tmp_path / "vp.json")
     assert store.adapt(speaker_a[0][0], speaker_a[0][1]) is False
+
+
+# --- learning must not make the next acceptance easier -----------------------
+#
+# From a security review of the adaptive profile. Scoring takes the best of
+# every stored clip, so one accepted utterance becomes a lasting exemplar. That
+# is the point when it is really you. It is a problem if the same clip also
+# moves the bar: an outlier scores badly against its peers, so recalculating
+# from the widened set drags the worst leave-one-out score down and lowers the
+# bar for whoever comes next. One lucky accept would buy a standing invitation.
+
+
+@needs_model
+def test_enrolment_clips_are_marked_as_anchors(tmp_path, speaker_a):
+    store = vp.VoicePrint(tmp_path / "vp.json")
+    profile = store.enrol(
+        [speaker_a[0][0], speaker_a[1][0]], sample_rate=speaker_a[0][1]
+    )
+    assert profile.anchors == 2
+    assert profile.anchors == len(profile.vectors)
+
+
+@needs_model
+def test_learning_never_moves_the_bar(tmp_path, speaker_a):
+    store = vp.VoicePrint(tmp_path / "vp.json")
+    store.enrol([speaker_a[0][0], speaker_a[1][0]], sample_rate=speaker_a[0][1])
+    before = (store.profile.match_at, store.profile.reject_at)
+
+    assert store.adapt(speaker_a[2][0], speaker_a[2][1]) is True
+    assert (store.profile.match_at, store.profile.reject_at) == before
+
+
+@needs_model
+def test_learning_does_not_promote_itself_to_an_anchor(tmp_path, speaker_a):
+    store = vp.VoicePrint(tmp_path / "vp.json")
+    store.enrol([speaker_a[0][0]], sample_rate=speaker_a[0][1])
+    store.adapt(speaker_a[1][0], speaker_a[1][1])
+
+    assert store.profile.anchors == 1
+    assert len(store.profile.vectors) == 2
+    # And it survives a round trip, or the next run would treat it as enrolled.
+    assert vp.VoicePrint(tmp_path / "vp.json").profile.anchors == 1
+
+
+@needs_model
+def test_the_clips_you_recorded_are_never_evicted(tmp_path, speaker_a):
+    """The tail rotates. What you sat down and recorded does not."""
+    store = vp.VoicePrint(tmp_path / "vp.json")
+    store.enrol([speaker_a[0][0], speaker_a[1][0]], sample_rate=speaker_a[0][1])
+    anchors = store.profile.vectors[:2]
+
+    for _ in range(vp.MAX_VECTORS + 6):
+        store.adapt(speaker_a[2][0], speaker_a[2][1])
+
+    assert store.profile.anchors == 2
+    assert store.profile.vectors[:2] == anchors
+    assert len(store.profile.vectors) <= vp.MAX_VECTORS
+
+
+def test_a_profile_from_before_anchors_treats_its_clips_as_anchors(tmp_path):
+    """Those clips came from --enroll, because adapt did not exist yet."""
+    legacy = {
+        "embedding": [float(x) for x in _vector(41)],
+        "vectors": [[float(x) for x in _vector(41)]],
+        "samples": 1,
+        "match_at": 0.5,
+        "reject_at": 0.3,
+    }
+    path = tmp_path / "vp.json"
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+    assert vp.VoicePrint(path).profile.anchors == 1
