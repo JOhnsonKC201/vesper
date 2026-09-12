@@ -212,16 +212,23 @@ class Profile:
         # A profile written before `vectors` existed has exactly one point in it,
         # its mean, so it is read as a one-clip profile and keeps scoring the way
         # it always did. Nothing about an old file starts behaving differently.
-        if not vectors and len(embedding) == EMBEDDING_DIM:
+        backfilled = not vectors and len(embedding) == EMBEDDING_DIM
+        if backfilled:
             vectors = (embedding,)
         # A profile written before anchors existed has only enrolment clips in
         # it, because adapt did not exist either, so all of them are anchors.
         anchors = int(data.get("anchors") or 0) or len(vectors)
+        # `samples` on such a file counts the clips that were recorded, not the
+        # clips that survived into it: four were averaged into one mean and the
+        # other three are gone. Reporting the recorded count made --check and
+        # --voicecheck say "4 clips" about a profile with one point in it, which
+        # is the sort of confident wrong number those two exist to eliminate.
+        samples = len(vectors) if backfilled else int(data.get("samples") or 0)
         return Profile(
             embedding=embedding,
             vectors=vectors,
             anchors=min(anchors, len(vectors)),
-            samples=int(data.get("samples") or 0),
+            samples=samples,
             spread=float(data.get("spread") or 0.0),
             created=str(data.get("created") or ""),
             model=str(data.get("model") or ""),

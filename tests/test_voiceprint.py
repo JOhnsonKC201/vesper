@@ -162,9 +162,12 @@ def test_an_old_single_mean_profile_still_loads(tmp_path):
     path.write_text(json.dumps(legacy), encoding="utf-8")
     profile = vp.VoicePrint(path).profile
     assert profile.enrolled
-    assert profile.samples == 4
-    # Treated as one clip, so scoring behaves exactly as it used to.
+    # Treated as one clip, so scoring behaves exactly as it used to, and it
+    # says one rather than four. The file records how many clips were recorded;
+    # three of them were averaged away and never stored, so four was a count of
+    # something that is not in the profile.
     assert len(profile.vectors) == 1
+    assert profile.samples == 1
 
 
 def test_a_legacy_profile_is_reported_as_uncalibrated(tmp_path):
@@ -311,3 +314,37 @@ def test_a_profile_from_before_anchors_treats_its_clips_as_anchors(tmp_path):
     path = tmp_path / "vp.json"
     path.write_text(json.dumps(legacy), encoding="utf-8")
     assert vp.VoicePrint(path).profile.anchors == 1
+
+
+def test_an_old_profile_counts_the_clips_it_kept_not_the_ones_recorded(tmp_path):
+    """The file on this machine says four. One survived.
+
+    Four clips were averaged into a single mean and the other three were never
+    stored, so reporting the recorded count made --check and --voicecheck say
+    "4 clips" about a profile with one point in it. A confident wrong number is
+    exactly what those two exist to eliminate.
+    """
+    legacy = {
+        "embedding": [float(x) for x in _vector(43)],
+        "samples": 4,
+        "spread": 0.83,
+    }
+    path = tmp_path / "vp.json"
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    profile = vp.VoicePrint(path).profile
+    assert profile.enrolled
+    assert len(profile.vectors) == 1
+    assert profile.samples == 1
+
+
+def test_a_current_profile_keeps_its_own_count(tmp_path):
+    stored = [[float(x) for x in _vector(seed)] for seed in (44, 45)]
+    path = tmp_path / "vp.json"
+    path.write_text(json.dumps({
+        "embedding": stored[0], "vectors": stored, "samples": 2, "anchors": 2,
+    }), encoding="utf-8")
+
+    profile = vp.VoicePrint(path).profile
+    assert profile.samples == 2
+    assert len(profile.vectors) == 2
