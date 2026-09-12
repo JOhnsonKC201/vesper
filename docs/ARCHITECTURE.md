@@ -26,6 +26,40 @@ split is what makes the protocol testable against a recorded transcript, so a
 change in the CLI's frame shape fails a unit test rather than silently making
 Vesper mute.
 
+### The dividend: it runs offline for free
+
+Choosing a subprocess over an API client paid for something nobody was asking
+for at the time. The CLI is an HTTP client that happens to default to Anthropic,
+so pointing it at a model server on this machine needs no new protocol, no new
+parser and no API key. `brain.provider` is `cloud`, `local` or `auto`, and
+offline mode is three environment variables in `child_env` plus a different
+`--model`. There is no second code path to keep in step.
+
+Three details are worth knowing, because each one was a bug first.
+
+**The switch is the teardown.** Base URL, auth token and the blanked API key are
+environment, and environment is fixed at spawn, so a running child cannot be
+moved between providers. `start()` returns early when a process is alive, so a
+fallback part way through a conversation once flipped the flag, called `start()`,
+got a no-op, and carried on feeding the original cloud-pointed child while the
+log said otherwise. `use_local()` now stops the process itself, so no caller can
+forget to.
+
+**There is no reachability probe.** Nothing in the package may open a socket, and
+the only honest test of whether Anthropic can be reached is having tried. The
+login check that already runs before every spawn is the signal.
+
+**The API key is blanked, not left alone.** A real key in the environment can
+outrank the base URL, which would send an offline turn to Anthropic: the single
+thing this exists to prevent, and the sort of failure that leaves every other
+assertion passing.
+
+The gate does not move. `--safe-mode` and `--permission-mode manual` are passed
+whatever the provider, and `allowed_tools` is never widened, because a weaker
+model is a reason for the gate to matter more rather than less. `WebSearch` is
+dropped when local: a tool that can only fail is worse than an absent one, since
+Claude spends a step discovering that and then apologises about it out loud.
+
 ### When the CLI cannot run the turn at all
 
 The CLI reports a turn it could not run as an ordinary `result` frame with
