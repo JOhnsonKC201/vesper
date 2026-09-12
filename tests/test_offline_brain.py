@@ -159,6 +159,7 @@ def test_an_ordinary_error_is_not_mistaken_for_a_local_one():
 # login dead" but "given a dead login, does anybody still get an answer".
 
 from conftest import FakeBrain  # noqa: E402
+from vesper.conversation import ConversationConfig  # noqa: E402
 from tests.test_conversation import build, settle  # noqa: E402
 
 
@@ -374,3 +375,75 @@ def test_a_switch_that_changes_nothing_leaves_the_process_alone():
     brain.stop = lambda *a, **k: stopped.append(True)
     assert brain.use_local(False) is False
     assert not stopped
+
+
+# --- being able to tell which brain answered --------------------------------
+#
+# The switch was only ever written to the log. The person most likely to be on
+# the local model is the one who started this from login with no console on
+# screen, so the one signal that existed was the one they could not see. They
+# would notice the answers got shallower and have no way to find out why.
+
+
+def test_status_says_which_brain_is_answering():
+    conv, brain, _, _, speaker, _ = build()
+    brain.local = False
+    assert conv.status()["local"] is False
+
+    brain.local = True
+    status = conv.status()
+    speaker.close()
+    assert status["local"] is True
+
+
+def test_status_names_the_model_that_is_actually_running():
+    from vesper.brain.claude import BrainConfig
+
+    conv, brain, _, _, speaker, _ = build()
+    brain.config = BrainConfig(model="opus", local_model="vesper-local:3b")
+
+    brain.local = False
+    assert conv.status()["model"] == "opus"
+    brain.local = True
+    model = conv.status()["model"]
+    speaker.close()
+    assert model == "vesper-local:3b"
+
+
+def test_status_stays_scalar():
+    """The dashboard reads this across a thread boundary."""
+    conv, brain, _, _, speaker, _ = build()
+    brain.local = True
+    status = conv.status()
+    speaker.close()
+    for key in ("local", "model"):
+        assert isinstance(status[key], (int, float, str, bool)), key
+
+
+def test_the_greeting_says_so_when_it_is_running_offline():
+    conv, brain, _, voice, speaker, _ = build(
+        config=ConversationConfig(greet_on_start=False)
+    )
+    brain.local = True
+    conv.config.greet_on_start = True
+    conv.start()
+    settle(speaker)
+    conv.stop()
+    speaker.close()
+
+    assert any("offline" in line.lower() for line in voice.lines), voice.lines
+
+
+def test_the_greeting_is_unchanged_online():
+    conv, brain, _, voice, speaker, _ = build(
+        config=ConversationConfig(greet_on_start=False)
+    )
+    brain.local = False
+    conv.config.greet_on_start = True
+    conv.start()
+    settle(speaker)
+    conv.stop()
+    speaker.close()
+
+    assert voice.lines, "it said nothing at all"
+    assert not any("offline" in line.lower() for line in voice.lines), voice.lines

@@ -410,7 +410,15 @@ class Conversation:
 
         self._running.set()
         if self.config.greet_on_start and not self._locked_out:
-            self.speaker.say(f"{self.config.name} here. I'm listening.")
+            greeting = f"{self.config.name} here. I'm listening."
+            if getattr(self.brain, "local", False):
+                # Said out loud because the fallback is otherwise invisible. The
+                # switch is only written to the log, and the person most likely
+                # to be affected is the one who started this from login with no
+                # console on screen. They will notice the answers got shallower;
+                # this is what stops that being a mystery.
+                greeting += " I'm offline, running on this machine."
+            self.speaker.say(greeting)
 
     def _warm(self, what: str, load) -> threading.Thread:
         """Build one model on its own thread, reporting rather than raising."""
@@ -556,9 +564,24 @@ class Conversation:
             # boundary, and a test asserts nothing richer than int, float, str
             # or bool ever appears in it.
             "voice": str(getattr(self.speaker.voice, "name", "")),
+            # Which brain is answering. Worth surfacing because the difference is
+            # felt rather than announced: offline is a much smaller model, and
+            # somebody wondering why the answers got shallower deserves to be
+            # able to look instead of guess. Scalars, like everything else here.
+            "local": bool(getattr(self.brain, "local", False)),
+            "model": self._model_name(),
             "learned": len(self.lessons.items) if self.lessons is not None else 0,
             "hands_standing": self.hands_standing,
         }
+
+    def _model_name(self) -> str:
+        """Whichever model is actually answering, cloud or local."""
+        config = getattr(self.brain, "config", None)
+        if config is None:
+            return ""
+        if getattr(self.brain, "local", False):
+            return str(getattr(config, "local_model", "") or "")
+        return str(getattr(config, "model", "") or "")
 
     @property
     def hands_standing(self) -> bool:

@@ -516,6 +516,13 @@ class Dashboard:
         else:
             label, colour, hint = "asleep", STAR, 'say "Vasper" to wake him.'
 
+        if data.get("local"):
+            # Appended rather than given a row of its own, because it qualifies
+            # the state above rather than being a fourth state. Offline is not
+            # an error and must not be coloured like one.
+            model = str(data.get("model") or "a local model")
+            hint = f"{hint}  offline, on {model}."
+
         self._fields["state"].config(text=label, fg=colour)
         self._fields["dot"].config(fg=colour)
         self._fields["hint"].config(text=hint)
