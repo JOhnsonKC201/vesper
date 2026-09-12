@@ -645,3 +645,40 @@ def test_a_closed_client_can_still_be_used_again():
     client.close()
     assert list(client.stream_pcm("Two.", "voice-id")), "it did not come back"
     client.close()
+
+
+def test_eviction_takes_the_manifest_entry_with_the_audio(tmp_path):
+    """The audio was capped; the index of it was not.
+
+    `_note` added a line for every sentence ever spoken and nothing removed one,
+    so the manifest kept growing long after its audio had been evicted. It is
+    rewritten in full on every cache write, so the cost of the oldest sentence
+    was paid again on each of the newest.
+    """
+    import json
+
+    from vesper.tts.cache import AudioCache, key_for
+
+    cache = AudioCache(tmp_path / "c", max_bytes=4096)
+    cache.put("V1", "oldest and unused", b"x" * 3000)
+    cache.put("V1", "newest", b"y" * 3000)
+
+    manifest = json.loads((tmp_path / "c" / "V1" / "manifest.json").read_text())
+    assert key_for("newest") in manifest
+    assert key_for("oldest and unused") not in manifest, (
+        "the audio was evicted and its manifest line outlived it"
+    )
+
+
+def test_a_manifest_entry_survives_while_its_audio_does(tmp_path):
+    """The other half: pruning must not remove what is still cached."""
+    import json
+
+    from vesper.tts.cache import AudioCache, key_for
+
+    cache = AudioCache(tmp_path / "c", max_bytes=1_000_000)
+    cache.put("V1", "kept", b"x" * 1000)
+
+    manifest = json.loads((tmp_path / "c" / "V1" / "manifest.json").read_text())
+    assert key_for("kept") in manifest
+    assert cache.get("V1", "kept") == b"x" * 1000

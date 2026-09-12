@@ -205,6 +205,7 @@ class AudioCache:
         total = sum(size for _, size, _ in files)
         if total <= self.max_bytes:
             return
+        evicted: list[Path] = []
         for _, size, path in sorted(files):
             if total <= self.max_bytes:
                 break
@@ -212,6 +213,42 @@ class AudioCache:
                 path.unlink()
                 total -= size
             except OSError:
+                continue
+            evicted.append(path)
+        self._forget(evicted)
+
+    def _forget(self, paths: list[Path]) -> None:
+        """Drop manifest entries whose audio has just been evicted.
+
+        The audio was always capped. The index of it never was: `_note` added a
+        line for every sentence ever spoken and nothing ever removed one, so the
+        manifest kept growing long after the audio it described was deleted. Not
+        fatal on its own, but the whole file is rewritten on every cache write,
+        so the cost of the oldest sentence is paid again on each of the newest.
+
+        Grouped by folder, so a run of evictions rewrites each manifest once
+        rather than once per file.
+        """
+        by_folder: dict[Path, list[str]] = {}
+        for path in paths:
+            by_folder.setdefault(path.parent, []).append(path.stem)
+
+        for folder, keys in by_folder.items():
+            manifest = folder / "manifest.json"
+            try:
+                existing = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(existing, dict):
+                continue
+            # The file stem IS `key_for(text)`, which is what makes this a lookup
+            # rather than a search through the stored text.
+            dropped = [key for key in keys if existing.pop(key, None) is not None]
+            if not dropped:
+                continue
+            try:
+                manifest.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+            except (OSError, ValueError):
                 continue
 
     def clear(self) -> None:
