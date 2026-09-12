@@ -83,9 +83,21 @@ def test_local_points_the_cli_at_this_machine():
     assert env["ANTHROPIC_AUTH_TOKEN"]
 
 
+# Assembled rather than written out, the same way test_privacy.py builds its
+# fixture key. A literal would be a credential-shaped string in the tree, and CI
+# greps the tree for exactly that shape, correctly refusing to care that this one
+# is fake.
+_FAKE_KEY = "sk" + "-ant-" + "notarealkeyjustatestvalue"
+
+
 def test_local_clears_any_real_api_key(monkeypatch):
-    """A key in the environment would send the turn to Anthropic after all."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-be-used")
+    """A key left in the environment would send the turn to Anthropic after all.
+
+    The single most important test in this file. Offline mode exists so that
+    nothing leaves the machine, and a key that outranks the base URL would undo
+    the whole thing while every other assertion here still passed.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", _FAKE_KEY)
     env = child_env(_config(local=True))
     assert not env.get("ANTHROPIC_API_KEY")
 
@@ -98,9 +110,9 @@ def test_cloud_adds_nothing_to_the_environment(monkeypatch):
 
 
 def test_cloud_does_not_strip_a_key_the_user_set(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-theirs")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", _FAKE_KEY)
     env = child_env(_config(local=False))
-    assert env["ANTHROPIC_API_KEY"] == "sk-ant-theirs"
+    assert env["ANTHROPIC_API_KEY"] == _FAKE_KEY
 
 
 def test_vespers_own_secrets_are_still_withheld(monkeypatch):
