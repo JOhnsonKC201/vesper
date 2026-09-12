@@ -52,6 +52,16 @@ def _vector(seed):
     return _unit(rng.normal(size=vp.EMBEDDING_DIM))
 
 
+# The speaker model is a 26MB download that `--enroll` fetches once, so CI does
+# not have it and `embed` returns None there. The same guard test_unattended.py
+# uses, for the same reason: these tests are about real audio, and without the
+# model there is no audio to be right or wrong about.
+needs_model = pytest.mark.skipif(
+    not vp.available(),
+    reason="the speaker model is not downloaded; run --enroll once",
+)
+
+
 def _mixed(seed, other, weight):
     """A vector like `seed` but pulled `weight` of the way toward `other`."""
     return _unit(_vector(seed) * (1.0 - weight) + _vector(other) * weight)
@@ -106,6 +116,7 @@ def test_calibration_of_nothing_falls_back_to_the_defaults():
 # --- the profile keeps every clip ------------------------------------------
 
 
+@needs_model
 def test_a_profile_keeps_every_clip_not_just_their_average(tmp_path, speaker_a):
     store = vp.VoicePrint(tmp_path / "vp.json")
     profile = store.enrol(
@@ -177,6 +188,7 @@ def test_a_legacy_profile_still_uses_the_old_constants(tmp_path):
 # --- real voices ------------------------------------------------------------
 
 
+@needs_model
 def test_the_same_real_speaker_matches(tmp_path, speaker_a):
     store = vp.VoicePrint(tmp_path / "vp.json")
     store.enrol([speaker_a[0][0], speaker_a[1][0]], sample_rate=speaker_a[0][1])
@@ -184,6 +196,7 @@ def test_the_same_real_speaker_matches(tmp_path, speaker_a):
     assert verdict == vp.MATCH, f"own voice scored {score:.3f}"
 
 
+@needs_model
 def test_a_different_real_speaker_is_rejected(tmp_path, speaker_a, speaker_b):
     store = vp.VoicePrint(tmp_path / "vp.json")
     store.enrol([speaker_a[0][0], speaker_a[1][0]], sample_rate=speaker_a[0][1])
@@ -195,6 +208,7 @@ def test_a_different_real_speaker_is_rejected(tmp_path, speaker_a, speaker_b):
 # --- learning as it goes ----------------------------------------------------
 
 
+@needs_model
 def test_a_confirmed_utterance_joins_the_profile(tmp_path, speaker_a):
     store = vp.VoicePrint(tmp_path / "vp.json")
     store.enrol([speaker_a[0][0]], sample_rate=speaker_a[0][1])
@@ -205,6 +219,7 @@ def test_a_confirmed_utterance_joins_the_profile(tmp_path, speaker_a):
     assert len(vp.VoicePrint(tmp_path / "vp.json").profile.vectors) == before + 1
 
 
+@needs_model
 def test_learning_refuses_a_voice_that_is_not_yours(tmp_path, speaker_a, speaker_b):
     store = vp.VoicePrint(tmp_path / "vp.json")
     store.enrol([speaker_a[0][0], speaker_a[1][0]], sample_rate=speaker_a[0][1])
@@ -213,6 +228,7 @@ def test_learning_refuses_a_voice_that_is_not_yours(tmp_path, speaker_a, speaker
     assert len(store.profile.vectors) == before
 
 
+@needs_model
 def test_learning_is_capped_so_the_file_cannot_grow_forever(tmp_path, speaker_a):
     store = vp.VoicePrint(tmp_path / "vp.json")
     store.enrol([speaker_a[0][0]], sample_rate=speaker_a[0][1])
