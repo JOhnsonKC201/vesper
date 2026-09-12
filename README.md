@@ -257,7 +257,8 @@ the cost. It was already light.
 ## What leaves this machine
 
 Out of the box, only your conversation with Claude, through the `claude`
-process, exactly as it would from any terminal.
+process, exactly as it would from any terminal. Set `brain.provider` to `local`
+and not even that: see [with the router unplugged](#with-the-router-unplugged).
 
 Everything else is local. Speech recognition is Whisper on your CPU. The voice
 is a Piper model on disk. The sensors read Windows APIs. The wake word is
@@ -285,6 +286,64 @@ That redaction covers the context attached to every turn, not the whole drive.
 Vesper can read any file you can, so a file it reads because you asked about it
 goes into the conversation like anything else. The gate in the next section is
 about changing things; reading is deliberately ungated.
+
+---
+
+## With the router unplugged
+
+Set `brain.provider` and nothing leaves the machine at all.
+
+```yaml
+brain:
+  provider: auto              # cloud | local | auto
+  local_host: "localhost:11434"
+  local_model: "vesper-local:3b"
+```
+
+`cloud` is the subscription. `local` is a model server on this machine. `auto`
+uses the subscription when the startup login check says it can be reached and
+falls back when it cannot, which covers a plane, a dead router and a login that
+expired overnight with one setting.
+
+This is small because of a decision made long before it: the brain is a
+subprocess, not an API client. The same binary speaking the same protocol can be
+pointed somewhere else, so offline mode is three environment variables and a
+different `--model` rather than a second code path. Everything else was already
+local.
+
+It is less clever, and it is not slower. Measured on an RTX 5060 laptop:
+
+| | first token | |
+|---|---|---|
+| opus, over the network | ~1,500ms | far better judgement |
+| `vesper-local:3b` | ~1,100ms | fine at facts, weak at nuance |
+
+The local model is `qwen2.5:3b-instruct-q4_K_M` with two settings changed, and
+both are load bearing:
+
+```
+ollama create vesper-local:3b -f Modelfile
+  FROM qwen2.5:3b-instruct-q4_K_M
+  PARAMETER num_ctx 16384
+  PARAMETER temperature 0
+```
+
+The stock 4096 token context is smaller than the CLI's prompt plus one tool
+result. The request reached 5,183 tokens, the oldest were dropped silently, and
+the model answered "no markdown files" while holding a tool result that listed
+one. Stock temperature then made a 3B model unreliable at reading the results it
+did see. A 9.7B model was tried and is not viable on this card: it spilled 71%
+onto the processor and the turn timed out.
+
+The permission gate is identical offline. `--safe-mode` and
+`--permission-mode manual` are always passed and the allowlist is never widened,
+because a weaker model is a reason for the gate to matter more rather than less.
+`WebSearch` is dropped, since offline it can only fail, and a tool that always
+fails is worse than an absent one.
+
+`run.bat --check` asks the local brain whether it is actually there, by spawning
+the CLI and reading what comes back. Under `local` a dead server fails the check.
+Under `auto` it is a note, because a missing fallback is not a broken install.
 
 ---
 
