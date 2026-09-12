@@ -13,6 +13,7 @@ import pytest
 
 from vesper.audio.speaker import Speaker
 from vesper.audio.vad import EndpointConfig
+from vesper import conversation as conversation_module
 from vesper.conversation import Conversation, ConversationConfig
 from vesper.wake import WakeConfig, WakeGate
 
@@ -662,3 +663,265 @@ def test_the_first_utterance_never_builds_a_second_model():
         thread.join(timeout=30)
 
     assert len(builds) == 1, f"{len(builds)} models were built at once"
+
+
+# --- the voice profile, watched rather than trusted --------------------------
+#
+# Added after a real profile rejected its owner 266 times across eleven days and
+# nothing anywhere said so. These pin the two halves of the fix: a profile that
+# never matches is called out, and a profile that does match keeps up with the
+# room it is used in.
+
+
+class StubProfile:
+    def __init__(self, *, calibrated=True, match_threshold=0.5):
+        self.calibrated = calibrated
+        self.match_threshold = match_threshold
+        self.reject_threshold = match_threshold - 0.2
+        self.samples = 4
+        self.created = "2026-09-11T00:00:00"
+        self.spread = 0.9
+
+
+class StubVoicePrint:
+    """A voiceprint whose verdict the test chooses."""
+
+    def __init__(self, verdict, score, *, calibrated=True, match_threshold=0.5):
+        self.enrolled = True
+        self.profile = StubProfile(
+            calibrated=calibrated, match_threshold=match_threshold
+        )
+        self._verdict, self._score = verdict, score
+        self.adapted = 0
+
+    def compare(self, audio, sample_rate=16000):
+        return self._verdict, self._score
+
+    def adapt(self, audio, sample_rate=16000):
+        self.adapted += 1
+        return True
+
+
+def _score_many(conv, count):
+    for _ in range(count):
+        conv._is_the_right_voice(audio())
+
+
+def test_a_profile_that_never_matches_is_called_out_once():
+    conv, _, _, _, speaker, ui = build()
+    conv.voiceprint = StubVoicePrint("unsure", 0.32)
+    _score_many(conv, conversation_module.VOICE_DOUBT_AFTER + 6)
+    speaker.close()
+
+    complaints = [w for w in ui.warnings if "not matched you" in w]
+    assert len(complaints) == 1, ui.warnings
+    assert "--voicecheck" in complaints[0]
+
+
+def test_nothing_is_said_before_there_is_enough_evidence():
+    conv, _, _, _, speaker, ui = build()
+    conv.voiceprint = StubVoicePrint("unsure", 0.32)
+    _score_many(conv, conversation_module.VOICE_DOUBT_AFTER - 1)
+    speaker.close()
+
+    assert not [w for w in ui.warnings if "not matched you" in w]
+
+
+def test_a_working_profile_is_never_called_out():
+    conv, _, _, _, speaker, ui = build()
+    conv.voiceprint = StubVoicePrint("match", 0.82)
+    _score_many(conv, conversation_module.VOICE_DOUBT_AFTER + 6)
+    speaker.close()
+
+    assert not [w for w in ui.warnings if "not matched you" in w]
+
+
+def test_rejections_alone_still_raise_the_alarm():
+    """Ignoring you 266 times is the failure mode, so it has to count too."""
+    conv, _, _, _, speaker, ui = build()
+    conv.voiceprint = StubVoicePrint("different", 0.10)
+    _score_many(conv, conversation_module.VOICE_DOUBT_AFTER + 2)
+    speaker.close()
+
+    assert [w for w in ui.warnings if "not matched you" in w]
+
+
+def test_status_reports_both_halves_of_the_voice_story():
+    conv, _, _, _, speaker, _ = build()
+    conv.voiceprint = StubVoicePrint("match", 0.82)
+    _score_many(conv, 3)
+    speaker.close()
+
+    status = conv.status()
+    assert status["voice_scored"] == 3
+    assert status["voice_matches"] == 3
+
+
+def test_a_marginal_match_is_folded_into_the_profile():
+    """A clip that only just cleared the bar is the one worth learning from."""
+    conv, _, _, _, speaker, _ = build()
+    print_ = StubVoicePrint("match", 0.52, match_threshold=0.5)
+    conv.voiceprint = print_
+    conv._is_the_right_voice(audio())
+    speaker.close()
+
+    assert print_.adapted == 1
+
+
+def test_a_comfortable_match_teaches_nothing_and_is_not_stored():
+    conv, _, _, _, speaker, _ = build()
+    print_ = StubVoicePrint("match", 0.95, match_threshold=0.5)
+    conv.voiceprint = print_
+    conv._is_the_right_voice(audio())
+    speaker.close()
+
+    assert print_.adapted == 0
+
+
+def test_learning_is_rate_limited_so_the_file_is_not_rewritten_constantly():
+    conv, _, _, _, speaker, _ = build()
+    print_ = StubVoicePrint("match", 0.52, match_threshold=0.5)
+    conv.voiceprint = print_
+    _score_many(conv, 8)
+    speaker.close()
+
+    assert print_.adapted == 1
+
+
+def test_an_uncalibrated_profile_is_never_learned_into():
+    """Adding clips to a profile whose bar was never measured compounds a guess."""
+    conv, _, _, _, speaker, _ = build()
+    print_ = StubVoicePrint("match", 0.52, calibrated=False, match_threshold=0.5)
+    conv.voiceprint = print_
+    conv._is_the_right_voice(audio())
+    speaker.close()
+
+    assert print_.adapted == 0
+
+
+# --- reacting fast ----------------------------------------------------------
+#
+# Two separate savings. A prefix is transcribed while the endpointer is still
+# waiting out the silence, which takes the transcriber off the critical path
+# entirely; and a holding phrase now fires on a deadline rather than only on the
+# first tool call, so a plain question no longer buys the brain's whole time to
+# first token as dead air.
+
+
+class SlowBrain(FakeBrain):
+    """Says nothing for a while, then answers. The shape of a real first token."""
+
+    def __init__(self, replies, delay=0.45):
+        super().__init__(replies)
+        self.delay = delay
+
+    def ask(self, payload):
+        time.sleep(self.delay)
+        yield from super().ask(payload)
+
+
+def _slow_build(replies, delay=0.45, **kwargs):
+    conv, brain, stt, voice, speaker, ui = build(replies=replies, **kwargs)
+    slow = SlowBrain(replies, delay=delay)
+    conv.brain = slow
+    return conv, slow, voice, speaker, ui
+
+
+def test_a_silent_turn_gets_a_holding_phrase():
+    """Without this a plain question is 1.5s of silence, which reads as a crash."""
+    conv, _, voice, speaker, _ = _slow_build(["It is half past two."], delay=0.5)
+    conv.config.quick_filler_after_s = 0.1
+    conv.respond("what time is it")
+    settle(speaker)
+    speaker.close()
+
+    assert len(voice.lines) == 2, voice.lines
+    assert voice.lines[-1] == "It is half past two."
+
+
+def test_a_fast_turn_says_no_holding_phrase_at_all():
+    """The filler is for dead air. An answer that arrives first leaves none."""
+    conv, _, voice, speaker, _ = _slow_build(["Half past two."], delay=0.0)
+    conv.config.quick_filler_after_s = 5.0
+    conv.respond("what time is it")
+    settle(speaker)
+    speaker.close()
+
+    assert voice.lines == ["Half past two."]
+
+
+def test_zero_disables_the_holding_phrase():
+    conv, _, voice, speaker, _ = _slow_build(["Half past two."], delay=0.3)
+    conv.config.quick_filler_after_s = 0.0
+    conv.respond("what time is it")
+    settle(speaker)
+    speaker.close()
+
+    assert voice.lines == ["Half past two."]
+
+
+def test_only_one_holding_phrase_however_many_threads_want_one():
+    """The timer and the first tool call both want to speak. One of them wins."""
+    conv, brain, voice, speaker, _ = _slow_build(["Done."], delay=0.3)
+    conv.config.quick_filler_after_s = 0.05
+    brain.tools_to_report = [("Bash", "ls")]
+    conv.respond("list my files")
+    settle(speaker)
+    speaker.close()
+
+    assert len(voice.lines) == 2, voice.lines
+
+
+def test_the_timer_does_not_speak_after_the_turn_is_over():
+    """A cancelled timer is the whole reason the turn wraps in try/finally.
+
+    Left running, a turn that answered instantly would be followed half a second
+    later by a cheerful "let me look" into the silence.
+    """
+    conv, _, voice, speaker, _ = _slow_build(["Half past two."], delay=0.0)
+    conv.config.quick_filler_after_s = 0.15
+    conv.respond("what time is it")
+    settle(speaker)
+    time.sleep(0.4)  # past the deadline the timer would have fired at
+    settle(speaker)
+    speaker.close()
+
+    assert voice.lines == ["Half past two."]
+
+
+def test_a_prefix_transcribed_during_the_pause_is_the_one_used():
+    conv, _, stt, _, speaker, _ = build(
+        replies=["Two."], transcripts=["Vesper, what is one plus one"]
+    )
+    conv._start_early_transcription(audio())
+    conv.endpointer.peek_was_final = True
+    transcript = conv._transcript_for(audio())
+    speaker.close()
+
+    assert transcript.text == "Vesper, what is one plus one"
+    # One decode, not two: the saving is that the full audio is never re-read.
+    assert stt.calls == 1, stt.calls
+
+
+def test_a_prefix_is_thrown_away_when_you_kept_talking():
+    """Answering half a sentence because somebody paused is the failure here."""
+    conv, _, stt, _, speaker, _ = build(
+        replies=["Two."], transcripts=["Vesper, what is one", "Vesper, what is one plus one"]
+    )
+    conv._start_early_transcription(audio())
+    conv.endpointer.peek_was_final = False
+    transcript = conv._transcript_for(audio())
+    speaker.close()
+
+    assert transcript.text == "Vesper, what is one plus one"
+
+
+def test_no_prefix_means_the_ordinary_path():
+    conv, _, stt, _, speaker, _ = build(
+        replies=["Two."], transcripts=["Vesper, what time is it"]
+    )
+    transcript = conv._transcript_for(audio())
+    speaker.close()
+
+    assert transcript.text == "Vesper, what time is it"
+    assert stt.calls == 1

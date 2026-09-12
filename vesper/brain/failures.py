@@ -23,6 +23,26 @@ from .protocol import TurnComplete
 AUTH = "auth"
 OTHER = "other"
 
+# The offline brain has its own two ways of being broken, and both read as
+# "Claude is down" unless they are named. They are close to the opposite: the
+# subscription is fine and the thing on this machine is not running, so the fix
+# is a command here rather than a login somewhere else.
+NO_LOCAL_SERVER = "no-local-server"
+NO_LOCAL_MODEL = "no-local-model"
+
+# Connection refused as an HTTP client reports it, plus the wording a local
+# server uses when it is running but has never heard of the model asked for.
+_NO_SERVER_PHRASES = re.compile(
+    r"econnrefused|connection refused|failed to connect|could not connect|"
+    r"connect error|fetch failed|socket hang up",
+    re.IGNORECASE,
+)
+_NO_MODEL_PHRASES = re.compile(
+    r"model [\"']?[\w.:\-]+[\"']? not found|no such model|try pulling it|"
+    r"unknown model",
+    re.IGNORECASE,
+)
+
 # The CLI's own error code for a login that could not be refreshed, as it
 # appears on the assistant frame. The phrases are a fallback for a build that
 # stops sending the code, and are the wording the CLI has actually used.
@@ -39,6 +59,14 @@ _SPOKEN = {
         "Open a terminal, run claude login, then talk to me again."
     ),
     OTHER: "That didn't go through on Claude's side. Ask me again in a moment.",
+    NO_LOCAL_SERVER: (
+        "I'm running offline and the model on this machine isn't answering. "
+        "Start it with ollama serve, then ask me again."
+    ),
+    NO_LOCAL_MODEL: (
+        "I'm running offline and the local model is missing. "
+        "Check the brain settings, then ask me again."
+    ),
 }
 
 
@@ -53,6 +81,22 @@ def classify(done: TurnComplete) -> str | None:
     if done.api_error == _AUTH_CODE or _AUTH_PHRASES.search(done.text or ""):
         return AUTH
     return OTHER
+
+
+def classify_local(text: str) -> str | None:
+    """Which offline failure this error text describes, if it is one at all.
+
+    Separate from `classify` because it reads raw error text rather than a
+    finished turn: a local server that is not listening fails before any turn
+    exists, so the message arrives as a BrainError or on stderr.
+    """
+    if not text:
+        return None
+    if _NO_SERVER_PHRASES.search(text):
+        return NO_LOCAL_SERVER
+    if _NO_MODEL_PHRASES.search(text):
+        return NO_LOCAL_MODEL
+    return None
 
 
 def spoken_line(kind: str) -> str:

@@ -25,6 +25,23 @@ brain:
   # holding phrases ("let me look") already cover. Drop to sonnet if you would
   # rather have the second back.
   model: opus
+  # Where the thinking happens. cloud is the subscription, local is a model
+  # server on this machine, auto uses the subscription when the login check says
+  # it can be reached and this machine when it cannot.
+  #
+  # Offline is faster to first word and much weaker at judgement. The permission
+  # gate is not relaxed there.
+  provider: auto
+  # A host and port, not a URL. Anything serving Anthropic's /v1/messages shape.
+  local_host: "localhost:11434"
+  # Create it once, sharing the base weights so it costs no extra disk:
+  #   ollama create vesper-local:3b -f Modelfile
+  #     FROM qwen2.5:3b-instruct-q4_K_M
+  #     PARAMETER num_ctx 16384
+  #     PARAMETER temperature 0
+  # Both parameters are load bearing: the default 4096 context is smaller than
+  # this CLI's prompt plus one tool result, so the result was silently dropped.
+  local_model: "vesper-local:3b"
   # Blank means your home directory, which gives Claude reach across projects.
   cwd: ""
   # Everything outside the working directory that Vesper may read. Reading is

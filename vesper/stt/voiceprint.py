@@ -86,6 +86,44 @@ MIN_REJECT_SECONDS = 1.6
 CONFIDENT_MATCH = 0.55
 CLEARLY_DIFFERENT = 0.35
 
+# Those two constants were wrong for the one user who mattered, and stayed wrong
+# for eleven days in silence. `var/vesper.log` holds 279 scored utterances whose
+# maximum was 0.54 on every single day, against a bar of 0.55: not one match,
+# ever, while 266 utterances were thrown away. The model was never the problem.
+# Enrolled on two real fixture clips it scores the third at 0.80 and a different
+# speaker at 0.05, so the separation was always there to be used.
+#
+# Two things caused it. The bar was a guess that nobody checked against this
+# user's own numbers, and a profile was a single averaged centroid, which sits
+# between unlike clips and therefore near none of them. So the bar is now
+# measured by `calibrate` and stored in the profile, and a clip is scored against
+# every sample you gave. The constants above remain the fallback for a profile
+# recorded before this change, which must keep behaving exactly as it did rather
+# than silently acquiring new thresholds.
+#
+# How far below your own worst agreement the bar sits. Enrolment is a handful of
+# clips in one sitting; live use is every mood, mic distance and head cold, so
+# the live spread is wider than the enrolled one and the bar must allow for it.
+CALIBRATION_MARGIN = 0.12
+# Never demand more than this, however tightly your clips agreed. Two clips that
+# score 0.99 against each other are usually the same sentence said the same way,
+# which says nothing about tomorrow.
+MATCH_CEILING = 0.62
+# Never demand less than this, however badly they agreed. Below it the profile is
+# not separating anybody from anybody, which `--voicecheck` says out loud rather
+# than leaving to be inferred from being ignored.
+MATCH_FLOOR = 0.35
+# A rejection sits clear of the owner's own band, because the costs are not
+# symmetric: answering a stranger once is a curiosity, and ignoring your owner is
+# the whole feature failing. This is the gap kept below the match bar.
+REJECT_GAP = 0.18
+REJECT_FLOOR = 0.08
+
+# How many clips a profile may hold. Enrolment contributes a handful and `adapt`
+# adds confirmed utterances as they arrive, so without a cap the file grows for
+# as long as Vesper is used.
+MAX_VECTORS = 12
+
 MATCH, UNSURE, DIFFERENT = "match", "unsure", "different"
 
 _SESSION = None
@@ -95,13 +133,25 @@ _SESSION_FAILED = False
 
 @dataclass
 class Profile:
-    """An enrolled voice: the mean embedding, and how much it varied."""
+    """An enrolled voice: every clip of it, their mean, and where the bar sits.
+
+    `vectors` is the part that was missing. A mean alone is one point, and a
+    voice is a region: scored against the mean, an utterance at the edge of your
+    own range loses to the averaging, which is how a real owner came to sit at
+    0.54 for eleven days. Keeping the clips costs 1KB each and scores every
+    utterance against the nearest thing you actually said.
+    """
 
     embedding: tuple[float, ...] = ()
+    vectors: tuple[tuple[float, ...], ...] = ()
     samples: int = 0
     spread: float = 0.0
     created: str = ""
     model: str = ""
+    # Zero means "recorded before calibration existed", which is not the same as
+    # zero difficulty. Both properties below read them that way.
+    match_at: float = 0.0
+    reject_at: float = 0.0
 
     @property
     def enrolled(self) -> bool:
@@ -113,24 +163,55 @@ class Profile:
             and len(self.embedding) == EMBEDDING_DIM
         )
 
+    @property
+    def calibrated(self) -> bool:
+        """Were these thresholds measured from this voice, or inherited?"""
+        return self.match_at > 0.0 and self.reject_at > 0.0
+
+    @property
+    def match_threshold(self) -> float:
+        return self.match_at if self.calibrated else CONFIDENT_MATCH
+
+    @property
+    def reject_threshold(self) -> float:
+        return self.reject_at if self.calibrated else CLEARLY_DIFFERENT
+
     def to_dict(self) -> dict:
         return {
             "embedding": list(self.embedding),
+            "vectors": [list(v) for v in self.vectors],
             "samples": self.samples,
             "spread": self.spread,
             "created": self.created,
             "model": self.model,
+            "match_at": self.match_at,
+            "reject_at": self.reject_at,
         }
 
     @staticmethod
     def from_dict(data: dict) -> "Profile":
         raw = data.get("embedding") or []
+        embedding = tuple(float(x) for x in raw)
+        stored = data.get("vectors") or []
+        vectors = tuple(
+            tuple(float(x) for x in v)
+            for v in stored
+            if isinstance(v, (list, tuple)) and len(v) == EMBEDDING_DIM
+        )
+        # A profile written before `vectors` existed has exactly one point in it,
+        # its mean, so it is read as a one-clip profile and keeps scoring the way
+        # it always did. Nothing about an old file starts behaving differently.
+        if not vectors and len(embedding) == EMBEDDING_DIM:
+            vectors = (embedding,)
         return Profile(
-            embedding=tuple(float(x) for x in raw),
+            embedding=embedding,
+            vectors=vectors,
             samples=int(data.get("samples") or 0),
             spread=float(data.get("spread") or 0.0),
             created=str(data.get("created") or ""),
             model=str(data.get("model") or ""),
+            match_at=float(data.get("match_at") or 0.0),
+            reject_at=float(data.get("reject_at") or 0.0),
         )
 
 
@@ -250,6 +331,73 @@ def similarity(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.clip(np.dot(left, right), -1.0, 1.0))
 
 
+def _unit(vector: np.ndarray) -> np.ndarray:
+    return vector / max(float(np.linalg.norm(vector)), 1e-9)
+
+
+def leave_one_out(vectors: list[np.ndarray]) -> list[float]:
+    """For each clip, how well the rest of the profile recognises it.
+
+    This is the only honest dress rehearsal available at enrolment time. Hold one
+    clip back, build the profile from the others, and score the held-out clip
+    exactly the way a live utterance will be scored. What comes back is the range
+    of scores your own voice produces against your own profile, which is the
+    number the bar has to sit below.
+    """
+    usable = [np.asarray(v, dtype=np.float32) for v in vectors if v is not None]
+    if len(usable) < 2:
+        # One clip cannot be held out from itself. A single-clip profile scores
+        # its own clip at 1.0, so there is nothing to measure and the caller
+        # falls back to the floor.
+        return [1.0] * len(usable)
+
+    scores = []
+    for index, held in enumerate(usable):
+        others = usable[:index] + usable[index + 1 :]
+        reference = [_unit(np.mean(np.vstack(others), axis=0))] + others
+        scores.append(max(similarity(held, candidate) for candidate in reference))
+    return scores
+
+
+def calibrate(vectors: list[np.ndarray]) -> tuple[float, float]:
+    """Where the match and reject bars belong for this particular voice.
+
+    Derived, not guessed. The match bar sits a margin below the worst score your
+    own clips produce against the rest of your own profile, clamped so that
+    neither unusually tight nor unusually loose enrolment can produce a bar that
+    is impossible or meaningless. The reject bar sits a further gap below that,
+    because being ignored by your own assistant is a worse failure than
+    answering somebody else once.
+    """
+    usable = [np.asarray(v, dtype=np.float32) for v in vectors if v is not None]
+    if not usable:
+        return CONFIDENT_MATCH, CLEARLY_DIFFERENT
+
+    worst = min(leave_one_out(usable))
+    match = min(max(worst - CALIBRATION_MARGIN, MATCH_FLOOR), MATCH_CEILING)
+    reject = max(match - REJECT_GAP, REJECT_FLOOR)
+    return round(match, 4), round(reject, 4)
+
+
+def score_against(profile: "Profile", vector: np.ndarray) -> float:
+    """How much this utterance looks like the enrolled voice.
+
+    The best of the stored clips and their mean, rather than the mean alone. A
+    voice is a region and an average is a point: scored against the point, an
+    utterance at the edge of your own range is penalised for variation you
+    cannot help, which is exactly the failure this replaces.
+    """
+    if vector is None:
+        return 0.0
+    candidates = [np.asarray(v, dtype=np.float32) for v in profile.vectors]
+    mean = np.asarray(profile.embedding, dtype=np.float32)
+    if mean.size:
+        candidates.append(mean)
+    if not candidates:
+        return 0.0
+    return max(similarity(vector, candidate) for candidate in candidates)
+
+
 # --- the profile on disk ----------------------------------------------------
 
 
@@ -290,19 +438,25 @@ class VoicePrint:
         if not vectors:
             return Profile()
 
-        mean = np.mean(np.vstack(vectors), axis=0)
-        mean = mean / max(float(np.linalg.norm(mean)), 1e-9)
+        # More clips than the cap is not a problem worth solving cleverly: the
+        # later ones are the ones said after the microphone settled.
+        vectors = vectors[-MAX_VECTORS:]
+        mean = _unit(np.mean(np.vstack(vectors), axis=0))
         # How much your own samples agreed with each other. Read back by
         # --enroll: if your own clips only score 0.5 against their own average,
         # nothing downstream can separate you from anybody else.
         spread = float(np.mean([similarity(mean, v) for v in vectors]))
+        match_at, reject_at = calibrate(vectors)
 
         profile = Profile(
             embedding=tuple(float(x) for x in mean),
+            vectors=tuple(tuple(float(x) for x in v) for v in vectors),
             samples=len(vectors),
             spread=spread,
             created=datetime.now().isoformat(timespec="seconds"),
             model=MODEL_REPO,
+            match_at=match_at,
+            reject_at=reject_at,
         )
         self._profile = profile
         self._save(profile)
@@ -334,13 +488,61 @@ class VoicePrint:
         if vector is None:
             return UNSURE, 0.0
 
-        stored = np.asarray(profile.embedding, dtype=np.float32)
-        score = similarity(vector, stored)
-        if score >= CONFIDENT_MATCH:
+        score = score_against(profile, vector)
+        if score >= profile.match_threshold:
             return MATCH, score
-        if score <= CLEARLY_DIFFERENT:
+        if score <= profile.reject_threshold:
             # A confident-looking mismatch on a short clip is not confident, it
             # is just short. Only long enough utterances may be rejected.
             long_enough = audio.size >= int(MIN_REJECT_SECONDS * sample_rate)
             return (DIFFERENT if long_enough else UNSURE), score
         return UNSURE, score
+
+    def adapt(self, audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> bool:
+        """Add an utterance that is known to be yours. Returns whether it did.
+
+        The root cause of the eleven silent days was a profile recorded once, in
+        one sitting, on a microphone path that later changed underneath it, with
+        no way to notice or catch up. A profile that never learns is a profile
+        that can only drift. So an utterance confirmed as yours by evidence
+        stronger than this model's own opinion, a typed line or a clear match,
+        joins the profile and the bar is recalculated from the wider set.
+
+        It refuses anything the profile already rejects, which is what stops a
+        stranger or a television talking its way in one utterance at a time. That
+        guard is the whole reason this is safe: the caller decides the utterance
+        is yours, and this still declines if the voice says otherwise.
+        """
+        profile = self.profile
+        if not profile.enrolled:
+            return False
+        if audio is None or audio.size < int(MIN_SECONDS * sample_rate):
+            return False
+
+        vector = embed(audio, sample_rate)
+        if vector is None:
+            return False
+        if score_against(profile, vector) <= profile.reject_threshold:
+            return False
+
+        # Oldest out first, so the profile tracks the microphone as it is now
+        # rather than accumulating a decade of rooms.
+        kept = list(profile.vectors) + [tuple(float(x) for x in vector)]
+        kept = kept[-MAX_VECTORS:]
+        arrays = [np.asarray(v, dtype=np.float32) for v in kept]
+        mean = _unit(np.mean(np.vstack(arrays), axis=0))
+        match_at, reject_at = calibrate(arrays)
+
+        updated = Profile(
+            embedding=tuple(float(x) for x in mean),
+            vectors=tuple(kept),
+            samples=len(kept),
+            spread=float(np.mean([similarity(mean, v) for v in arrays])),
+            created=profile.created,
+            model=profile.model or MODEL_REPO,
+            match_at=match_at,
+            reject_at=reject_at,
+        )
+        self._profile = updated
+        self._save(updated)
+        return True

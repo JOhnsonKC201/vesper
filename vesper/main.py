@@ -193,6 +193,13 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
             add_dirs=tuple(cfg.brain.add_dirs),
             turn_timeout_s=cfg.brain.turn_timeout_s,
             permission_mode=cfg.brain.permission_mode,
+            provider=cfg.brain.provider,
+            local_host=cfg.brain.local_host,
+            local_model=cfg.brain.local_model,
+            # `local` starts false whatever the preference is. With `auto` the
+            # startup login check decides, and with `local` the line below does.
+            # Neither is knowable here, where nothing has been asked yet.
+            local=cfg.brain.provider.strip().lower() == "local",
         ),
         # With -v the brain's lines share the console. Without it they still
         # go to the file, tagged BRAIN: on 2026-09-04 the child failed every
@@ -631,10 +638,19 @@ def check(cfg: config_module.Config, *, gate: bool = True) -> int:
 
     print(f"  --    voice model  "
           f"{'ready' if voice_model_ready() else 'not downloaded, run --enroll'}")
-    voiceprint = cfg.voiceprint_path()
-    enrolled = voiceprint is not None and voiceprint.exists()
-    print(f"  --    your voice  "
-          f"{'enrolled' if enrolled else 'not enrolled, every voice is accepted'}")
+    # Not just "is there a file". A profile recorded before the thresholds were
+    # calibrated sat on this machine for eleven days rejecting its own owner and
+    # never said a word about it, so the state that actually matters is printed.
+    profile = VoicePrint(cfg.voiceprint_path()).profile
+    if not profile.enrolled:
+        print("  --    your voice  not enrolled, every voice is accepted")
+    elif not profile.calibrated:
+        print(f"  --    your voice  enrolled {profile.created[:10] or 'once'}, "
+              f"NOT calibrated")
+        print("        run --voicecheck: an uncalibrated profile can ignore you")
+    else:
+        print(f"  --    your voice  enrolled, {profile.samples} clips, "
+              f"match at {profile.match_threshold:.2f}")
 
     # Last, because it is the only check that talks to Anthropic, and because
     # everything above has to work for it to mean anything. It is also the only
@@ -676,6 +692,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--devices", action="store_true", help="list microphones")
     parser.add_argument("--enroll", action="store_true",
                         help="teach it your voice, so it ignores everyone else")
+    parser.add_argument("--voicecheck", action="store_true",
+                        help="measure whether it actually recognises your voice")
     parser.add_argument("--install-autostart", action="store_true",
                         help="start with Windows, hidden")
     parser.add_argument("--desktop-icon", action="store_true",
@@ -737,6 +755,10 @@ def main(argv: list[str] | None = None) -> int:
         from .enroll import run as run_enroll
 
         return run_enroll(cfg)
+    if args.voicecheck:
+        from .voicecheck import run as run_voicecheck
+
+        return run_voicecheck(cfg)
     if args.check:
         return check(cfg, gate=not args.offline)
     if args.say:
