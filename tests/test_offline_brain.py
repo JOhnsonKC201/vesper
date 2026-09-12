@@ -447,3 +447,10 @@ def test_the_greeting_is_unchanged_online():
 
     assert voice.lines, "it said nothing at all"
     assert not any("offline" in line.lower() for line in voice.lines), voice.lines
+
+
+def test_the_clis_own_wording_for_a_model_it_cannot_find_is_recognised():
+    """Taken verbatim from --check run against a model that was never pulled."""
+    text = ("There's an issue with the selected model (no-such-model:999). "
+            "It may not exist")
+    assert failures.classify_local(text) == failures.NO_LOCAL_MODEL

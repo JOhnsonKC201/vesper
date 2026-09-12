@@ -560,6 +560,85 @@ def list_devices() -> int:
     return 0
 
 
+def _local_brain_check(cfg: config_module.Config) -> tuple[bool, str]:
+    """Ask the local model one trivial question. Returns (ok, what to print).
+
+    There is no cheaper way to answer this honestly. Nothing in the package may
+    open a socket, so "is the server up" cannot be asked directly, and a check
+    that only confirmed the configuration would pass on a machine where nothing
+    was running. So it does the real thing the real way: spawns the CLI pointed
+    at the local server and reads what comes back.
+
+    Costs a few seconds and no money, which is the point of it being local.
+    """
+    from .brain import failures
+    from .brain.claude import BrainConfig, ClaudeBrain
+    from .brain.protocol import BrainError, SessionReady, TurnComplete
+
+    brain = ClaudeBrain(
+        BrainConfig(
+            executable=cfg.brain.executable,
+            model=cfg.brain.model,
+            cwd=cfg.brain_cwd(),
+            system_prompt="Answer with one word.",
+            # One read-only tool, not none. An empty list omits --tools entirely
+            # and the CLI then offers its whole default set, whose schemas are a
+            # large prompt: measured here, that took a 3B model from answering in
+            # seconds to wandering through file reads for 96 seconds before the
+            # turn timed out. Read is on the standing allowlist anyway, so this
+            # is the same shape as a normal turn and can change nothing.
+            tools=("Read",),
+            allowed_tools=("Read",),
+            provider="local",
+            local_host=cfg.brain.local_host,
+            local_model=cfg.brain.local_model,
+            local=True,
+            # Short, because a dead server is discovered by waiting. A cold model
+            # load here takes seconds; a minute of silence is the check hanging.
+            turn_timeout_s=30.0,
+        )
+    )
+
+    trouble = ""
+    answered = False
+    try:
+        for event in brain.ask("Reply with the single word: ok"):
+            if isinstance(event, BrainError):
+                trouble = event.message
+                break
+            if isinstance(event, TurnComplete):
+                if event.is_error:
+                    trouble = event.text
+                else:
+                    answered = True
+                break
+            if isinstance(event, SessionReady):
+                # The CLI saying it has started, which it does before it has
+                # spoken to any server at all. Counting this as proof reported a
+                # healthy brain against a port with nothing behind it.
+                continue
+            # Anything else is real proof: the server took the prompt and
+            # generated something. This asks whether the local brain is alive,
+            # not whether it is clever, and holding out for a well-formed answer
+            # would be measuring the model rather than the server.
+            answered = True
+            break
+    except Exception as exc:  # a self check never takes the process down
+        trouble = str(exc)
+    finally:
+        brain.stop()
+
+    where = f"{cfg.brain.local_model} at {cfg.brain.local_host}"
+    if answered and not trouble:
+        return True, f"{where} answered"
+    kind = failures.classify_local(trouble)
+    if kind == failures.NO_LOCAL_SERVER:
+        return False, f"nothing listening at {cfg.brain.local_host}"
+    if kind == failures.NO_LOCAL_MODEL:
+        return False, f"{cfg.brain.local_model} is not on the server"
+    return False, f"{where} did not answer: {trouble[:80] or 'no reason given'}"
+
+
 def check(cfg: config_module.Config, *, gate: bool = True) -> int:
     """Verify every moving part, and say which one is broken."""
     ok = True
@@ -576,6 +655,19 @@ def check(cfg: config_module.Config, *, gate: bool = True) -> int:
 
     claude = shutil.which(cfg.brain.executable)
     report("claude cli", claude is not None, claude or "not on PATH")
+
+    provider = (cfg.brain.provider or "auto").strip().lower()
+    if provider in ("local", "auto") and claude is not None:
+        ok, detail = _local_brain_check(cfg)
+        if ok or provider == "local":
+            # Under `local` a dead server means no answers at all, so it fails.
+            report("local brain", ok, detail)
+        else:
+            # Under `auto` it only means the safety net is missing. Printed as a
+            # note rather than passed through `report`, which would have to say
+            # either "ok" beside a failure or "FAIL" for a working install.
+            print(f"  --    local brain  {detail}")
+            print("        offline fallback will not work until this is running")
 
     try:
         import sounddevice  # noqa: F401

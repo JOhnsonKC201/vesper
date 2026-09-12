@@ -39,7 +39,9 @@ _NO_SERVER_PHRASES = re.compile(
 )
 _NO_MODEL_PHRASES = re.compile(
     r"model [\"']?[\w.:\-]+[\"']? not found|no such model|try pulling it|"
-    r"unknown model",
+    # The CLI's own wording when the server rejects the model name, seen while
+    # testing --check against a model that was never pulled.
+    r"unknown model|issue with the selected model|it may not exist",
     re.IGNORECASE,
 )
 
