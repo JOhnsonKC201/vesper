@@ -469,6 +469,13 @@ than 4.4s.
 
 A question needing no tools answers faster: about 1.4s total.
 
+Every completed turn writes the same figures to `var/vesper.log` as a `TURN`
+line: the decode, the wait for the first token, the wait until something was
+audible, the whole turn, the number of tool steps, the cost, and which model
+answered. The console shows them too and loses them when it closes. That line
+is the number to read before and after any change to the brain or the pause,
+because it comes from a day of use rather than from a script.
+
 The second row used to say 450ms and `base.en`, from before the model had to be
 made bigger to hear the wake word reliably. `small.en` on the cpu costs 1.5s,
 which is the single largest thing between you and an answer, and it was being
