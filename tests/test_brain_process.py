@@ -292,6 +292,54 @@ def test_add_dirs_are_repeated_flags():
     assert argv.count("--add-dir") == 2
 
 
+def test_effort_and_fallback_reach_the_child_when_set():
+    argv = BrainConfig(model="fable", effort=" High ", fallback_model="opus").argv()
+    assert argv[argv.index("--model") + 1] == "fable"
+    assert argv[argv.index("--effort") + 1] == "high"
+    assert argv[argv.index("--fallback-model") + 1] == "opus"
+
+
+def test_neither_flag_appears_by_default():
+    """Blank means the CLI's own default, not a default of ours."""
+    argv = BrainConfig().argv()
+    assert "--effort" not in argv
+    assert "--fallback-model" not in argv
+
+
+def test_an_unknown_effort_is_dropped_rather_than_sent():
+    """`--effort medum` would end the spawn, and a spawn that ends over a typo
+    in a comfort setting is the wrong failure. The typo is warned about at
+    build time; here it simply does not reach the child."""
+    argv = BrainConfig(effort="medum").argv()
+    assert "--effort" not in argv
+    assert BrainConfig(effort="medum").effort_level() == ""
+
+
+def test_the_spawn_line_shows_every_flag_but_the_prompt():
+    """The log showed the first eight entries, which end before the model, so
+    a post-mortem could not tell which model, effort or tools a session ran
+    with. The prompt alone is withheld: ten thousand characters per spawn."""
+    from vesper.brain.claude import loggable_argv
+
+    argv = BrainConfig(
+        model="fable", effort="low", system_prompt="You are Vesper. " * 50
+    ).argv()
+    line = loggable_argv(argv)
+    assert "--model fable" in line
+    assert "--effort low" in line
+    assert "--safe-mode" in line
+    assert "You are Vesper" not in line
+    assert "<prompt, 800 chars>" in line
+
+
+def test_the_bare_config_spawns_the_same_model_as_the_app():
+    """The two defaults disagreed for a month, sonnet here and opus in
+    config.py, and nothing noticed because only the config value ever ran."""
+    from vesper import config as config_module
+
+    assert BrainConfig().model == config_module.BrainSettings().model
+
+
 # --- permission grants ------------------------------------------------------
 
 
