@@ -212,6 +212,42 @@ def test_lessons_survive_a_restart(tmp_path):
     assert "use British spelling" in Lessons(path).prompt_block()
 
 
+def test_a_stored_lesson_that_no_longer_passes_the_rules_is_dropped_on_load(tmp_path):
+    """The bounds in `_tidy` were tightened on 2026-09-07. Three rules stored
+    before that date sat in every system prompt for nine days afterwards,
+    "start up" and a question ending "I'll delete you" among them, because the
+    file was only ever judged when something new was said."""
+    path = tmp_path / "l.json"
+    when = "2026-09-08T02:14:12+00:00"
+    stale = [
+        {"text": "start up", "kind": EXPLICIT, "times": 1, "created": when, "last": when},
+        {"text": "find it. What's my girlfriend name? You have to find it. "
+                 "If you don't find it, I'll delete you",
+         "kind": EXPLICIT, "times": 1, "created": when, "last": when},
+        {"text": "use British spelling", "kind": EXPLICIT, "times": 2,
+         "created": when, "last": when},
+    ]
+    path.write_text(json.dumps(stale), encoding="utf-8")
+
+    store = Lessons(path)
+    assert [item.text for item in store.items] == ["use British spelling"]
+    assert store.items[0].times == 2, "the survivor keeps its history"
+    assert store.dropped_on_load == 2
+    assert "2 dropped, no longer rules" in store.summary()
+    # Rewritten once, so the next process does not find and drop them again.
+    assert len(json.loads(path.read_text(encoding="utf-8"))) == 1
+    assert Lessons(path).dropped_on_load == 0
+
+
+def test_a_clean_file_reports_nothing_dropped(tmp_path):
+    path = tmp_path / "l.json"
+    Lessons(path).learn("use British spelling", EXPLICIT)
+
+    store = Lessons(path)
+    assert store.dropped_on_load == 0
+    assert "dropped" not in store.summary()
+
+
 def test_a_broken_file_means_nothing_learned_rather_than_a_crash(tmp_path):
     path = tmp_path / "l.json"
     path.write_text("{ not a list")

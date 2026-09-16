@@ -227,26 +227,44 @@ class Lessons:
         self.max_in_prompt = max_in_prompt
         self._lock = threading.Lock()
         self._items: list[Lesson] | None = None
+        # How many stored lessons the current rules refused on load. The
+        # bounds in `_tidy` were tightened on 2026-09-07, and three rules
+        # stored before that sat in every system prompt for nine days after,
+        # because the file was only ever judged when something new was said.
+        self.dropped_on_load = 0
 
     # --- state --------------------------------------------------------------
 
     @property
     def items(self) -> list[Lesson]:
         if self._items is None:
-            self._items = self._load()
+            kept, dropped = self._load()
+            self._items = kept
+            self.dropped_on_load = dropped
+            if dropped:
+                # Once, so the next process does not find and drop them again.
+                self._save()
         return self._items
 
-    def _load(self) -> list[Lesson]:
+    def _load(self) -> tuple[list[Lesson], int]:
+        """What the file holds, judged by today's rules. Returns (kept, dropped).
+
+        A lesson is re-run through `_tidy` on the way in. The rules only ever
+        get stricter, and a rule that would be refused if it were said now has
+        no business riding in every prompt because it was said before the rule.
+        """
         if self.path is None or not self.path.exists():
-            return []
+            return [], 0
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return []
+            return [], 0
         if not isinstance(raw, list):
-            return []
+            return [], 0
         found = [Lesson.from_dict(item) for item in raw if isinstance(item, dict)]
-        return [lesson for lesson in found if lesson is not None]
+        stored = [lesson for lesson in found if lesson is not None]
+        kept = [lesson for lesson in stored if _tidy(lesson.text)]
+        return kept, len(stored) - len(kept)
 
     def _save(self) -> None:
         if self.path is None:
@@ -345,11 +363,13 @@ class Lessons:
     def summary(self) -> str:
         held = len(self.items)
         live = len(self.active())
+        dropped = self.dropped_on_load
+        note = f", {dropped} dropped, no longer rules" if dropped else ""
         if not held:
-            return "nothing learned yet"
+            return f"nothing learned yet{note}"
         if live == held:
-            return f"{held} things learned"
-        return f"{live} of {held} things learned, the rest waiting to be repeated"
+            return f"{held} things learned{note}"
+        return f"{live} of {held} things learned, the rest waiting to be repeated{note}"
 
 
 def _fingerprint(text: str) -> str:
