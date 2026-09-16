@@ -297,6 +297,11 @@ class Conversation:
         self.echo_rejections = 0
         # The last few holding phrases, so none comes back too soon.
         self._recent_fillers: collections.deque[str] = collections.deque(maxlen=3)
+        # How long Whisper took on the utterance that started the current turn,
+        # so the turn line in the log can show it. Zero when the turn was typed.
+        # The decoder has measured this on every utterance since the first day
+        # and nothing ever read it.
+        self._last_stt_s = 0.0
         self.proactive = None  # set by main once the ambient loop exists
         # Instructions worth keeping across restarts. None disables it and
         # Vesper forgets everything at every restart, as he used to.
@@ -910,6 +915,7 @@ class Conversation:
     def _on_utterance(self, audio: np.ndarray) -> None:
         self.ui.thinking("transcribing")
         transcript = self._transcript_for(audio)
+        self._last_stt_s = float(getattr(transcript, "latency_s", 0.0) or 0.0)
         if not transcript.ok:
             self.ui.discarded(transcript.rejected_reason or "unclear")
             return
@@ -1569,6 +1575,7 @@ class Conversation:
         # Typed, so it came from someone with the keyboard. That is a stronger
         # identity check than any voiceprint.
         self._voice_confirmed = True
+        self._last_stt_s = 0.0
         self._remember_heard(text)
         if self._consent_is_live():
             if self._settle_consent(text, echo=False):
@@ -1913,10 +1920,15 @@ class Conversation:
                             self._say(fallback)
 
                     self.register.note_success()
+                    # The two extras are for the log's turn line, which is the
+                    # only record of how long a real turn took: the console
+                    # line vanishes with the console.
                     self.ui.answered(
                         event,
                         total_s=time.monotonic() - started,
                         first_speech_s=(spoke_at - started) if spoke_at else None,
+                        stt_s=self._last_stt_s,
+                        model=self._model_name(),
                     )
                     if extras:
                         self._report_unasked(extras)
@@ -1964,7 +1976,7 @@ class _SilentUI:
     def screen(self, text): pass
     def permission(self, tool, detail): pass
     def decision(self, decision, action): pass
-    def answered(self, turn, total_s, first_speech_s): pass
+    def answered(self, turn, total_s, first_speech_s, **extra): pass
     def interrupted(self, dropped): pass
     def discarded(self, reason): pass
     def error(self, message): pass

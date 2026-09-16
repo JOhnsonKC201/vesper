@@ -122,7 +122,18 @@ class TerminalUI:
     def spoke(self, text: str) -> None:
         self._line("vesper", text, style="bold cyan", label_style="bold cyan")
 
-    def answered(self, turn, total_s: float, first_speech_s: float | None) -> None:
+    def answered(
+        self,
+        turn,
+        total_s: float,
+        first_speech_s: float | None,
+        *,
+        stt_s: float = 0.0,
+        model: str = "",
+    ) -> None:
+        # `stt_s` and `model` are for the log's turn line, teed in logfile.py.
+        # The console line is deliberately unchanged: it is read at a glance.
+        del stt_s, model
         self.turns += 1
         self.session_cost += getattr(turn, "cost_usd", 0.0)
         if not self.show_cost:

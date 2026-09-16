@@ -49,6 +49,110 @@ def test_the_log_records_what_the_terminal_would_have_shown(tmp_path):
     assert ui.errors == ["the brain died"]
 
 
+# --- how long each turn took -------------------------------------------------
+#
+# The console prints "3.2s to first word, 11.5s total" after every answer and
+# loses it the moment the console closes. Started from the login there is no
+# console, so until this line existed there was no record of how long a real
+# turn took: every latency number in the docs came from a script, never from
+# a day of use.
+
+
+def _turn_lines(path):
+    return [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if "  TURN " in line
+    ]
+
+
+def test_every_completed_turn_writes_its_timings(tmp_path):
+    log = LogFile(tmp_path / "vesper.log")
+    brain = FakeBrain(["About six hundred gigabytes free."])
+    conversation, speaker, ui = _conversation(brain=brain)
+    attach(ui, log)
+
+    conversation.hear("how much disk is free")
+    speaker.close()
+
+    lines = _turn_lines(tmp_path / "vesper.log")
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert "typed" in line, "a typed turn has no decode to time"
+    assert "first token 400ms" in line, "FakeBrain reports 400ms"
+    assert "first word" in line
+    assert "total" in line
+    assert "1 step" in line
+    assert "$0.008" in line
+    # And the terminal still got its line.
+    assert len(ui.answers) == 1
+
+
+def test_a_spoken_turn_records_the_decode_time(tmp_path):
+    log = LogFile(tmp_path / "vesper.log")
+    brain = FakeBrain(["Eight cores."])
+    conversation, speaker, ui = _conversation(
+        brain=brain, transcripts=["Vesper, how many cores"]
+    )
+    attach(ui, log)
+
+    conversation._on_utterance(np.zeros(16000, dtype=np.float32))
+    speaker.close()
+
+    (line,) = _turn_lines(tmp_path / "vesper.log")
+    assert "stt 10ms" in line, "FakeSTT reports a 10ms decode"
+    assert "typed" not in line
+
+
+def test_the_turn_line_names_the_brain_that_answered(tmp_path):
+    """Offline is a much smaller model. A turn that felt shallow is only
+    explicable if the log says which brain it was."""
+    from types import SimpleNamespace
+
+    log = LogFile(tmp_path / "vesper.log")
+    brain = FakeBrain(["Fine.", "Fine."])
+    brain.config = SimpleNamespace(model="opus", local_model="vesper-local:3b")
+    conversation, speaker, ui = _conversation(brain=brain)
+    attach(ui, log)
+
+    conversation.hear("how are you")
+    brain.local = True
+    conversation.hear("and now")
+    speaker.close()
+
+    first, second = _turn_lines(tmp_path / "vesper.log")
+    assert first.endswith("opus")
+    assert second.endswith("vesper-local:3b")
+
+
+def test_a_failed_turn_writes_no_turn_line(tmp_path):
+    """A dead login is logged as an ERROR already. Timing it as if it were an
+    answer would make the averages lie."""
+    from test_brain_failures import FailingBrain
+
+    log = LogFile(tmp_path / "vesper.log")
+    conversation, speaker, ui = _conversation(brain=FailingBrain(logged_in=False))
+    attach(ui, log)
+
+    conversation.hear("anything")
+    speaker.close()
+
+    assert _turn_lines(tmp_path / "vesper.log") == []
+
+
+def test_the_turn_line_reads_in_the_order_the_time_was_spent():
+    from vesper.brain.protocol import TurnComplete
+    from vesper.logfile import turn_line
+
+    turn = TurnComplete(text="x", cost_usd=0.041, ttft_ms=1480, turns=2)
+    assert (
+        turn_line(turn, 4.21, 0.83, stt_s=0.131, model="opus")
+        == "stt 131ms, first token 1480ms, first word 830ms, total 4210ms, 2 steps, $0.041, opus"
+    )
+    # A turn that never spoke has no first word, and a typed one no decode.
+    assert turn_line(TurnComplete(text="x"), 1.0, None) == "typed, total 1000ms, 0 steps, $0.000"
+
+
 def test_logging_survives_a_path_it_cannot_write(tmp_path):
     """A log that cannot be written is not a reason to stop answering. Same
     class of bug as audit.py's, where a null byte raised ValueError rather than

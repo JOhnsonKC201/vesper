@@ -109,6 +109,43 @@ class LogFile:
         self.write("error", message)
 
 
+def turn_line(
+    turn,
+    total_s: float,
+    first_speech_s: float | None,
+    *,
+    stt_s: float = 0.0,
+    model: str = "",
+) -> str:
+    """One line of numbers per completed turn, for the log.
+
+    Where the time went, in the order it was spent: the decode, the wait for
+    Claude's first token, the wait until something was audible (a holding
+    phrase counts, the same as on the console), the whole turn. Then how many
+    tool steps it took, what it cost, and which model answered, because a
+    turn that felt slow or shallow is only explicable if the log says which
+    brain it was.
+
+    Numbers only, so it is written whether or not transcripts are kept. The
+    console shows the same figures and loses them the moment it closes, and
+    before this line existed there was no record at all of how long a real
+    turn took: every latency number in the docs came from a script.
+    """
+    parts = [f"stt {stt_s * 1000:.0f}ms" if stt_s > 0 else "typed"]
+    ttft_ms = int(getattr(turn, "ttft_ms", 0) or 0)
+    if ttft_ms:
+        parts.append(f"first token {ttft_ms}ms")
+    if first_speech_s is not None:
+        parts.append(f"first word {first_speech_s * 1000:.0f}ms")
+    parts.append(f"total {total_s * 1000:.0f}ms")
+    steps = int(getattr(turn, "turns", 0) or 0)
+    parts.append(f"{steps} step" if steps == 1 else f"{steps} steps")
+    parts.append(f"${float(getattr(turn, 'cost_usd', 0.0) or 0.0):.3f}")
+    if model:
+        parts.append(str(model))
+    return ", ".join(parts)
+
+
 def attach(ui, log: LogFile, *, transcripts: bool = True):
     """Tee a TerminalUI's diagnostics into the log without changing the UI.
 
@@ -168,5 +205,23 @@ def attach(ui, log: LogFile, *, transcripts: bool = True):
             return _original(reason)
 
         ui.discarded = tee_discarded
+
+    # How long each turn took. Numbers only, so `transcripts` does not apply:
+    # nothing here can identify what was said, only how long it took to say.
+    answered = getattr(ui, "answered", None)
+    if answered is not None:
+
+        def tee_answered(
+            turn, total_s, first_speech_s, *, stt_s=0.0, model="", _original=answered
+        ):
+            log.write(
+                "turn",
+                turn_line(turn, total_s, first_speech_s, stt_s=stt_s, model=model),
+            )
+            return _original(
+                turn, total_s, first_speech_s, stt_s=stt_s, model=model
+            )
+
+        ui.answered = tee_answered
 
     return ui

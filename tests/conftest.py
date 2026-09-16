@@ -229,6 +229,7 @@ class RecordingUI:
         self.tools: list[tuple[str, str]] = []
         self.permissions: list[tuple[str, str]] = []
         self.answers: list = []
+        self.answer_extras: list[dict] = []
         self.discards: list[str] = []
         self.errors: list[str] = []
         self.warnings: list[str] = []
@@ -255,8 +256,9 @@ class RecordingUI:
     def decision(self, decision, action):
         self.decisions.append((decision, action))
 
-    def answered(self, turn, total_s, first_speech_s):
+    def answered(self, turn, total_s, first_speech_s, **extra):
         self.answers.append(turn)
+        self.answer_extras.append(dict(extra))
 
     def interrupted(self, dropped):
         self.interruptions.append(dropped)
