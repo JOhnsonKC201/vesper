@@ -256,21 +256,35 @@ the cost. It was already light.
 
 ## What leaves this machine
 
-Out of the box, only your conversation with Claude, through the `claude`
-process, exactly as it would from any terminal. Set `brain.provider` to `local`
-and not even that: see [with the router unplugged](#with-the-router-unplugged).
+Out of the box, your conversation with Claude, through the `claude` process,
+exactly as it would from any terminal, and the searches Claude runs to answer
+you. Set `brain.provider` to `local` and neither: see
+[with the router unplugged](#with-the-router-unplugged).
+
+The searches are new, and they are the one thing that leaves without a spoken
+question. `brain.free_web` is on by default, so "what's the weather tomorrow"
+or "who won last night" is answered by a web search Claude runs quietly, the
+way a person checks their phone, rather than by opening a Google results page
+in your browser. What goes is the search text, to Anthropic, which is the party
+that already holds the conversation: Claude Code's `WebSearch` is Anthropic's
+server-side search, not a request from this machine to a search engine.
+`WebFetch`, which reads one page and does run from this machine, still asks
+first and names the site. Set `free_web: false` and every search is asked
+about out loud, like a file write. Set `identity.location` and the city rides
+in the context of every turn, so weather needs no follow-up; leave it blank if
+that is more than you want to say.
 
 Everything else is local. Speech recognition is Whisper on your CPU. The voice
 is a Piper model on disk. The sensors read Windows APIs. The wake word is
 matched in memory. There is no telemetry and no account anywhere but the one
 you already have.
 
-**There is exactly one setting that changes this, and it is off by default.**
-Setting `voice.engine` to `elevenlabs` sends the text of Vesper's replies to
-ElevenLabs so they come back as speech. Those replies can quote the contents of
-your files, because Vesper can read the whole drive, so this is a real change
-rather than a technicality. Microphone audio never leaves under any setting,
-and putting `engine` back to `piper` stops all of it immediately.
+**There is exactly one other setting that changes this, and it is off by
+default.** Setting `voice.engine` to `elevenlabs` sends the text of Vesper's
+replies to ElevenLabs so they come back as speech. Those replies can quote the
+contents of your files, because Vesper can read the whole drive, so this is a
+real change rather than a technicality. Microphone audio never leaves under
+any setting, and putting `engine` back to `piper` stops all of it immediately.
 
 This is enforced, not just stated. `tests/test_privacy.py` fails the build if
 any module in `vesper/` opens a socket, contains a hardcoded URL, or spawns any
@@ -338,8 +352,10 @@ onto the processor and the turn timed out.
 The permission gate is identical offline. `--safe-mode` and
 `--permission-mode manual` are always passed and the allowlist is never widened,
 because a weaker model is a reason for the gate to matter more rather than less.
-`WebSearch` is dropped, since offline it can only fail, and a tool that always
-fails is worse than an absent one.
+`WebSearch` and `WebFetch` are dropped, since offline they can only fail, and a
+tool that always fails is worse than an absent one. The model is told so, in a
+note appended to its prompt only on a local spawn, because the persona
+otherwise promises a search it cannot make.
 
 `run.bat --check` asks the local brain whether it is actually there, by spawning
 the CLI and reading what comes back. Under `local` a dead server fails the check.
@@ -753,6 +769,10 @@ flowchart TD
 A conditional yes is not a yes. Nothing on the no-ask list is allowed to change
 anything or send anything off the machine, which is why `WebSearch`, `find`,
 `wmic` and a PowerShell `Get-*` wildcard were all taken off it after review.
+The search came back under its own name: `brain.free_web` lets `WebSearch` run
+without a question, on the child's allowlist rather than in that list, so the
+list's rule stays whole and the exception can be found in one line. See
+[what leaves this machine](#what-leaves-this-machine).
 
 ```
 you     Vesper, commit that fix.
@@ -846,7 +866,8 @@ review found six more: `find`, since GNU findutils has `-delete` and `-exec`;
 `nvidia-smi`, which can change device state; and a `powershell -Command Get-*`
 wildcard sitting on an interpreter's argument. `WebSearch` came off too, since
 it sends text off the machine. Every one of them meant an action nobody was
-ever asked about. A test now walks the list and rejects the whole class.
+ever asked about. A test now walks the list and rejects the whole class, and a
+second test pins that `free_web` widens the child and never this list.
 
 Silence never approves, and neither does anything that is not a plain yes.
 Asking Vesper something else instead lets the request lapse, while speech that
@@ -927,6 +948,8 @@ commented. The ones worth knowing:
 | `listening.whisper_model` | `base.en` for speed, `small.en` or `large-v3-turbo` for proper nouns. |
 | `listening.follow_up_window_s` | How long he stays awake after anyone speaks. 0 requires his name on every single utterance. Approving a change and ending him take the name either way. |
 | `identity.personality` | Free text appended to the persona. The dial for how it feels. |
+| `identity.location` | Where you are, in your words. Rides in every turn's context so weather needs no follow-up. Blank sends nothing. |
+| `brain.free_web` | On by default: a web search runs without a spoken question. The one thing that leaves without asking. False to be asked every time. |
 | `voice.speed` | Piper's natural pace reads slightly slow for conversation. |
 | `voice.choice` | Where the dashboard writes the voice you picked. It beats `model`, `character` and `eleven.voice_id`; delete the file to go back to the config. |
 | `voice.character` | `jarvis`, `broadcast`, or `natural` for Piper untouched. Compare with `python scripts/voice_ab.py`. |

@@ -74,10 +74,19 @@ def _spoken_idle(seconds: float) -> str:
     return f"idle {seconds / 3600:.1f} hours"
 
 
-def context_block(snapshot: Snapshot | None = None) -> str:
-    """The compact ambient context attached to every spoken turn."""
+def context_block(snapshot: Snapshot | None = None, *, location: str = "") -> str:
+    """The compact ambient context attached to every spoken turn.
+
+    `location` is where the user said they are, from config. It rides beside
+    the clock so weather and anything local can be answered without asking,
+    and it is absent when blank, because a line saying "where: unknown" is a
+    question the model would then ask out loud.
+    """
     snapshot = snapshot or take()
     lines = [f"time: {_spoken_time(snapshot.when)}"]
+    where = " ".join((location or "").split())
+    if where:
+        lines.append(f"where: {where}")
     if snapshot.window.known:
         lines.append(f"focused window: {snapshot.window.describe()}")
     lines.append(f"user: {_spoken_idle(snapshot.idle_s)}")

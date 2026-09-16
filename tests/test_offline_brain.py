@@ -23,10 +23,14 @@ def _config(**kwargs):
         model="opus",
         local_model="vesper-local:3b",
         local_host="localhost:11434",
-        tools=("Bash", "Read", "WebSearch"),
+        tools=("Bash", "Read", "WebSearch", "WebFetch"),
     )
     defaults.update(kwargs)
     return BrainConfig(**defaults)
+
+
+def _flag(argv, name):
+    return argv[argv.index(name) + 1]
 
 
 # --- which provider, and why ------------------------------------------------
@@ -61,6 +65,43 @@ def test_a_cloud_brain_keeps_web_search():
     argv = _config(local=False).argv()
     tools = argv[argv.index("--tools") + 1]
     assert "WebSearch" in tools
+    assert "WebFetch" in tools
+
+
+def test_a_local_brain_cannot_fetch_the_web_either():
+    """The same round trip, one page at a time."""
+    argv = _config(local=True).argv()
+    assert "WebFetch" not in _flag(argv, "--tools")
+    assert "WebFetch" not in " ".join(argv)
+
+
+def test_free_web_puts_search_on_the_child_allowlist_only_when_cloud():
+    """The widening lives on the child, so the configured read-only list keeps
+    its rule. Offline the tool does not exist, so the switch means nothing."""
+    cloud = _config(local=False, free_web=True, allowed_tools=("Read",)).argv()
+    assert _flag(cloud, "--allowedTools") == "Read,WebSearch"
+    local = _config(local=True, free_web=True, allowed_tools=("Read",)).argv()
+    assert _flag(local, "--allowedTools") == "Read"
+    asked = _config(local=False, free_web=False, allowed_tools=("Read",)).argv()
+    assert _flag(asked, "--allowedTools") == "Read"
+
+
+def test_free_web_never_widens_to_fetch():
+    """Search sends the query to the party that already holds the conversation.
+    Fetch pulls a page from this machine and could carry anything, so it stays
+    behind the gate whatever the switch says."""
+    argv = _config(local=False, free_web=True, allowed_tools=("Read",)).argv()
+    assert "WebFetch" not in _flag(argv, "--allowedTools")
+
+
+def test_a_local_brain_is_told_it_cannot_look_things_up():
+    """The greeting tells the user it is offline. Until this, nothing told the
+    model, and THE WORLD in the persona promises a search it cannot make."""
+    note = "You are offline and cannot search."
+    local = _config(local=True, system_prompt="Persona.", offline_note=note).argv()
+    assert _flag(local, "--system-prompt") == "Persona.\n\n" + note
+    cloud = _config(local=False, system_prompt="Persona.", offline_note=note).argv()
+    assert _flag(cloud, "--system-prompt") == "Persona."
 
 
 def test_the_gate_is_untouched_by_going_local():

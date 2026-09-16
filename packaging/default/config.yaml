@@ -17,6 +17,10 @@ identity:
   # Free text appended to the persona. This is the dial for how it feels.
   # Try: "Be a little sardonic. Never say sorry twice in one conversation."
   personality: "Warm and easy to talk to, like a sharp friend who happens to know computers. Contractions, a light touch of humour when it fits, and my name now and then. Still brief."
+  # Where you are, in your own words: "Baltimore", "Lagos, Nigeria". Rides in
+  # the context of every turn so "what's the weather tomorrow" needs no
+  # follow-up. It goes wherever the conversation goes. Blank sends nothing.
+  location: ""
 
 brain:
   executable: claude
@@ -50,7 +54,16 @@ brain:
   add_dirs: ["C:\\"]
   # Write and Edit are here so it can act once you say yes. They do nothing
   # until then: permission_mode refuses whatever allowed_tools omits.
-  tools: [Bash, Read, Write, Edit, Grep, Glob, WebSearch]
+  # WebSearch and WebFetch are how it answers anything about the world; both
+  # are dropped offline, where they can only fail.
+  tools: [Bash, Read, Write, Edit, Grep, Glob, WebSearch, WebFetch]
+  # A web search runs without a spoken question. This is the one thing that
+  # sends text off the machine without asking: the search, to Anthropic, the
+  # party that already holds the conversation. A named switch rather than an
+  # entry in allowed_tools below, so that list's rule stays whole. Set false
+  # and every search is asked about out loud, like a file write. WebFetch,
+  # which reads one page from this machine, always asks and names the site.
+  free_web: true
   # manual is what makes any of this real. In the CLI default (auto) a file
   # write under the working directory happens with no announcement at all.
   permission_mode: manual
@@ -58,7 +71,8 @@ brain:
   # Nothing here may change anything or send anything off the machine.
   # find, wmic, git branch, git remote, nvidia-smi and a powershell Get-*
   # wildcard were all removed after a review: every one of them could act
-  # with no question asked. WebSearch went too, since it sends text out.
+  # with no question asked. WebSearch went too, since it sends text out; it
+  # runs under free_web above instead, so the exception has a name.
   # Do not add bare Bash, or an interpreter: with Write refused Claude will
   # reach for `python -c` or `printf > file` and the gate stops meaning
   # anything. Anything missing here becomes a spoken question instead.

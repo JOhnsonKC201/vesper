@@ -72,6 +72,29 @@ def test_being_addressed_produces_speech():
     assert len(ui.answers) == 1
 
 
+def test_the_location_reaches_the_turn_context():
+    """So "what's the weather tomorrow" is answerable without a follow-up."""
+    conv, brain, _, _, speaker, _ = build(
+        replies=["Rain."],
+        config=ConversationConfig(greet_on_start=False, location="Baltimore"),
+    )
+    conv.hear("what's the weather tomorrow")
+    settle(speaker)
+    speaker.close()
+
+    assert "where: Baltimore" in brain.asked[0]
+    assert brain.asked[0].index("[machine context") < brain.asked[0].index("where:")
+
+
+def test_no_location_means_no_where_line():
+    conv, brain, _, _, speaker, _ = build(replies=["Rain."])
+    conv.hear("what's the weather tomorrow")
+    settle(speaker)
+    speaker.close()
+
+    assert "where:" not in brain.asked[0]
+
+
 def test_the_wake_word_is_not_sent_to_claude():
     conv, brain, _, _, speaker, _ = build(
         replies=["Fine."], transcripts=["Vesper, how is the disk"]

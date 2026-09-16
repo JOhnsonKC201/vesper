@@ -30,7 +30,7 @@ from .audio.mic import Microphone
 from .audio.speaker import Speaker
 from .audio.vad import EndpointConfig
 from .brain.claude import BrainConfig, ClaudeBrain
-from .brain.persona import build_system_prompt
+from .brain.persona import OFFLINE_NOTE, build_system_prompt
 from .brain.session_store import SessionStore
 from .conversation import Conversation, ConversationConfig
 from .learning import Lessons
@@ -190,6 +190,8 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
             ),
             tools=tuple(cfg.brain.tools),
             allowed_tools=tuple(cfg.brain.allowed_tools),
+            free_web=bool(cfg.brain.free_web),
+            offline_note=OFFLINE_NOTE,
             add_dirs=tuple(cfg.brain.add_dirs),
             turn_timeout_s=cfg.brain.turn_timeout_s,
             permission_mode=cfg.brain.permission_mode,
@@ -253,6 +255,7 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
             self_mute_ms=cfg.listening.self_mute_ms,
             greet_on_start=cfg.ui.greet_on_start,
             name=cfg.identity.name,
+            location=cfg.identity.location,
             consent_enabled=cfg.consent.enabled,
             consent_window_s=cfg.consent.window_s,
             audit_log=cfg.audit_path(),

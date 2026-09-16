@@ -9,7 +9,7 @@ it does not have, so it promised a kind of help it could not give.
 
 from vesper.brain.persona import (
     DECLINED_NOTE, HANDS_APPROVED_NOTE, HANDS_ASKED_NOTE, HANDS_STANDING_APPROVED_NOTE,
-    HANDS_STANDING_NOTE, build_system_prompt,
+    HANDS_STANDING_NOTE, OFFLINE_NOTE, build_system_prompt,
 )
 
 
@@ -35,16 +35,17 @@ def test_the_prompt_does_not_claim_a_mouse_or_keyboard():
     assert "vasper look" in prompt and "vasper click" in prompt
     assert "mouse and keyboard" in prompt and "in front of" in prompt
     assert "vasper focus" in prompt and "vasper screenshot" in prompt
-    # Browsing is the hands in Chrome, read off the page, never a background fetch.
+    # Browsing is the hands in Chrome, read off the page, when the user asked to
+    # open, show or go to something. A question is a silent search instead.
     assert "BROWSING" in prompt and "vasper read" in prompt
-    assert "never through WebSearch or WebFetch when they can watch" in prompt
+    assert "When they ask a question, search silently instead" in prompt
 
 
 def test_no_dashes_in_the_spoken_wording():
     prompt = build_system_prompt("Johnson", "Be terse.")
     for text in (
         prompt, DECLINED_NOTE, HANDS_APPROVED_NOTE, HANDS_ASKED_NOTE,
-        HANDS_STANDING_NOTE, HANDS_STANDING_APPROVED_NOTE,
+        HANDS_STANDING_NOTE, HANDS_STANDING_APPROVED_NOTE, OFFLINE_NOTE,
     ):
         assert "—" not in text and "–" not in text
 
@@ -54,7 +55,22 @@ def test_the_prompt_says_a_site_is_opened_by_its_address():
     prompt = build_system_prompt("Johnson", "Be terse.")
     assert "vasper open calendar.google.com" in prompt
     assert "A search is an address too" in prompt
-    assert "never through WebSearch or WebFetch when they can watch" in prompt
+    assert "in front of them." in prompt
+
+
+def test_the_prompt_searches_first_for_the_world():
+    """Until this block existed the prompt had no rule for anything off this
+    disk: weather, news, a score, a fact after training. The only route to any
+    of it was a Google results page opened in Chrome and read off the screen."""
+    prompt = build_system_prompt("Johnson", "Be terse.")
+    assert "THE WORLD" in prompt
+    assert "search first and then answer" in prompt
+    assert "WebSearch is yours to use and it is silent" in prompt
+    assert "asks first, naming the" in prompt, "fetch still asks"
+    assert "A question about the world is nothing to watch" in prompt
+    # Offline the promise is taken back, in the note the local spawn appends.
+    assert "WebSearch and WebFetch do not exist" in OFFLINE_NOTE
+    assert "from memory" in OFFLINE_NOTE
 
 
 def test_the_prompt_talks_like_a_person():

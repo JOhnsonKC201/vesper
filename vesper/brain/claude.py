@@ -47,6 +47,10 @@ _PRIVATE_ENV_PREFIX = "VESPER_"
 # looking for a real key and fails before it sends anything.
 _LOCAL_TOKEN = "ollama"
 
+# The two tools that reach the internet. Dropped offline, where they can only
+# fail, and the first is the one `free_web` lets run without a question.
+_WEB_TOOLS = ("WebSearch", "WebFetch")
+
 
 def child_env(config: "BrainConfig | None" = None) -> dict:
     """The environment the brain gets: ours, minus anything that is a secret."""
@@ -112,8 +116,21 @@ class BrainConfig:
     system_prompt: str = "You are Vesper, a helpful voice assistant."
     # Read freely. Anything that changes the machine is absent from this list
     # and therefore prompts, which the protocol surfaces as PermissionNeeded.
-    tools: tuple[str, ...] = ("Bash", "Read", "Grep", "Glob", "WebSearch")
+    tools: tuple[str, ...] = ("Bash", "Read", "Grep", "Glob", "WebSearch", "WebFetch")
     allowed_tools: tuple[str, ...] = ()
+    # Whether WebSearch may run without a spoken question. A named switch
+    # rather than an entry in `allowed_tools`, because that list's rule is
+    # "nothing here can change anything or send anything out", and a rule
+    # with one exception folded into it is a rule nobody can check at a
+    # glance. This is the one thing that sends text off the machine without
+    # asking: the search, to the party the conversation already goes to.
+    # WebFetch is different, the CLI fetches the page from this machine, so
+    # it stays behind the gate and its question names the host.
+    free_web: bool = False
+    # Appended to the system prompt when this spawn is local. The greeting and
+    # the dashboard tell the user it is offline; until this, nothing told the
+    # model, and a 3B model that thinks it can search apologises at length.
+    offline_note: str = ""
     add_dirs: tuple[str, ...] = ()
     turn_timeout_s: float = 180.0
     # `manual` is what makes the allowlist mean anything. Measured against the
@@ -143,13 +160,20 @@ class BrainConfig:
     def usable_tools(self) -> tuple[str, ...]:
         """The tool list for this spawn.
 
-        WebSearch is a round trip to a search engine, so offline it can only
-        fail, and a tool that always fails is worse than an absent one: Claude
-        spends a step discovering it, then apologises about it out loud.
+        WebSearch and WebFetch are round trips to the internet, so offline they
+        can only fail, and a tool that always fails is worse than an absent one:
+        Claude spends a step discovering it, then apologises about it out loud.
         """
         if not self.local:
             return self.tools
-        return tuple(t for t in self.tools if t != "WebSearch")
+        return tuple(t for t in self.tools if t not in _WEB_TOOLS)
+
+    def prompt_for_spawn(self) -> str:
+        """The system prompt, plus the offline note when this spawn is local."""
+        note = (self.offline_note or "").strip()
+        if self.local and note:
+            return f"{self.system_prompt}\n\n{note}"
+        return self.system_prompt
 
     def argv(self, resume_session: str = "", grants: tuple[str, ...] = ()) -> list[str]:
         args = [
@@ -162,7 +186,7 @@ class BrainConfig:
             "--safe-mode",
             "--exclude-dynamic-system-prompt-sections",
             "--model", self.which_model(),
-            "--system-prompt", self.system_prompt,
+            "--system-prompt", self.prompt_for_spawn(),
         ]
         # Never `if self.permission_mode:`. A blank or commented out value in
         # config.yaml dropped the flag entirely, and the session then ran in
@@ -177,8 +201,10 @@ class BrainConfig:
             args += ["--tools", ",".join(tools)]
         # Grants are the one-shot widening earned by a spoken yes. They ride on
         # the same flag as the standing read-only allowlist and last exactly as
-        # long as the process they were passed to.
-        allowed = tuple(dict.fromkeys(self.allowed_tools + tuple(grants)))
+        # long as the process they were passed to. The free search rides there
+        # too, on the child only: the configured allowlist keeps its rule.
+        free = ("WebSearch",) if self.free_web and not self.local else ()
+        allowed = tuple(dict.fromkeys(self.allowed_tools + free + tuple(grants)))
         if allowed:
             args += ["--allowedTools", ",".join(allowed)]
         for directory in self.add_dirs:
