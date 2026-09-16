@@ -174,7 +174,7 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
     # Built before the brain, because what he has learned goes into the
     # system prompt and the prompt is fixed for the life of the process.
     lessons = Lessons(cfg.lessons_path())
-    if lessons.active():
+    if lessons.active() or lessons.dropped_on_load:
         ui.info(lessons.summary())
 
     voice, voice_label = build_voice(cfg, ui)
