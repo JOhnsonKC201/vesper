@@ -51,6 +51,25 @@ _LOCAL_TOKEN = "ollama"
 # fail, and the first is the one `free_web` lets run without a question.
 _WEB_TOOLS = ("WebSearch", "WebFetch")
 
+# What `--effort` accepts, per `claude --help` on 2.1.273. Anything else is
+# dropped rather than sent: a typo in config.yaml must not kill the spawn.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+def loggable_argv(argv: list[str]) -> str:
+    """The spawn line for the log: every flag, never the prompt.
+
+    The log used to show the first eight entries, which end before the model,
+    so a post-mortem could not tell which model, effort or tools a session ran
+    with. The one value withheld is the system prompt: ten thousand characters
+    of persona on every spawn line would bury the rest of the log.
+    """
+    shown = list(argv)
+    for index, item in enumerate(shown[:-1]):
+        if item == "--system-prompt":
+            shown[index + 1] = f"<prompt, {len(shown[index + 1])} chars>"
+    return " ".join(shown)
+
 
 def child_env(config: "BrainConfig | None" = None) -> dict:
     """The environment the brain gets: ours, minus anything that is a secret."""
@@ -88,7 +107,20 @@ class BrainConfig:
     """Everything that shapes the child process invocation."""
 
     executable: str = "claude"
-    model: str = "sonnet"
+    # The same default as config.py, so a bare BrainConfig() in a test spawns
+    # what the app spawns. They disagreed for a month, sonnet here and opus
+    # there, and nothing noticed because only the config value ever ran.
+    model: str = "opus"
+    # How hard the cloud model thinks, one of EFFORT_LEVELS. Blank is the CLI's
+    # own default. Lower is a faster first word and shallower answers; the
+    # measured trade for each level lives in config.yaml, next to the setting.
+    # Never sent to the local model: what Ollama does with it is unverified.
+    effort: str = ""
+    # A second model to try when the first is overloaded or not available; the
+    # CLI retries the primary at the start of every turn. What makes it safe to
+    # set `model: fable` before knowing the plan carries it. Never sent to the
+    # local model, which would be asked for a model it does not have.
+    fallback_model: str = ""
     # cloud, local, or auto. auto means "the subscription when it can be reached,
     # this machine when it cannot", decided by the login check that already runs
     # at startup rather than by a probe: nothing in this package may open a
@@ -157,6 +189,24 @@ class BrainConfig:
     def which_model(self) -> str:
         return self.local_model if self.local else self.model
 
+    def effort_level(self) -> str:
+        """The effort the child will be sent, or "" for the CLI's default.
+
+        Blank when local, whatever is configured, and blank for a value the CLI
+        would refuse: `--effort medum` would end the spawn, and a spawn that
+        ends over a typo in a comfort setting is the wrong failure.
+        """
+        level = (self.effort or "").strip().lower()
+        if self.local or level not in EFFORT_LEVELS:
+            return ""
+        return level
+
+    def fallback(self) -> str:
+        """The fallback model the child will be sent, or "" for none."""
+        if self.local:
+            return ""
+        return (self.fallback_model or "").strip()
+
     def usable_tools(self) -> tuple[str, ...]:
         """The tool list for this spawn.
 
@@ -188,6 +238,12 @@ class BrainConfig:
             "--model", self.which_model(),
             "--system-prompt", self.prompt_for_spawn(),
         ]
+        # Both cloud only. Ollama has no fallback model to offer, and what it
+        # does with an effort level nobody has measured.
+        if self.effort_level():
+            args += ["--effort", self.effort_level()]
+        if self.fallback():
+            args += ["--fallback-model", self.fallback()]
         # Never `if self.permission_mode:`. A blank or commented out value in
         # config.yaml dropped the flag entirely, and the session then ran in
         # `auto`, where a Write under cwd goes through unannounced. A typo
@@ -328,7 +384,7 @@ class ClaudeBrain:
         if self.alive:
             return
         argv = self.config.argv(self.session_id if resume else "", self.grants)
-        self._log("spawning brain: " + " ".join(argv[:8]) + " ...")
+        self._log("spawning brain: " + loggable_argv(argv))
 
         env = self._child_env()
 

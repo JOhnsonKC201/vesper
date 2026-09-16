@@ -27,8 +27,18 @@ brain:
   # opus thinks harder and costs your machine nothing, since that happens on
   # Anthropic's side. It is roughly a second slower to the first word, which the
   # holding phrases ("let me look") already cover. Drop to sonnet if you would
-  # rather have the second back.
+  # rather have the second back. fable is the newest and most capable; set
+  # fallback_model to opus with it, in case the plan does not carry it.
   model: opus
+  # How hard the cloud model thinks: low, medium, high, xhigh or max. Blank is
+  # the CLI's own default. Lower is a faster first word and a shallower answer.
+  # Measure before choosing: python scripts/latency.py --effort low, and read
+  # the summary line. Never sent offline. A value the CLI does not know is
+  # dropped with a warning rather than sent, so a typo cannot end the spawn.
+  effort: ""
+  # A second model to try when the first is overloaded or not on your plan.
+  # The CLI retries the primary at the start of every turn. Never sent offline.
+  fallback_model: ""
   # Where the thinking happens. cloud is the subscription, local is a model
   # server on this machine, auto uses the subscription when the login check says
   # it can be reached and this machine when it cannot.
