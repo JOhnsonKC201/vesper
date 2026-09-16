@@ -204,6 +204,9 @@ class ConversationConfig:
     # Spoken in the greeting. Hardcoded until the name became a
     # setting, at which point it introduced itself as the wrong one.
     name: str = "Vasper"
+    # Where the user is, in their words, for the context of every turn. Blank
+    # sends nothing. Mirrors identity.location.
+    location: str = ""
     # Ask before anything that changes the machine. Turning this off does not
     # make Vesper act without asking, it makes it unable to act at all: the
     # refusal still happens in the CLI, there is simply no way to answer it.
@@ -1597,7 +1600,8 @@ class Conversation:
         now = sensors.take()
         self.register.note_idle(now.idle_s)
         context = register.attach(
-            sensors.context_block(now), self.register.line()
+            sensors.context_block(now, location=self.config.location),
+            self.register.line(),
         )
         self.register.note_turn(now.window.process)
         payload = frame_turn(text, context)

@@ -56,9 +56,14 @@ assertion passing.
 
 The gate does not move. `--safe-mode` and `--permission-mode manual` are passed
 whatever the provider, and `allowed_tools` is never widened, because a weaker
-model is a reason for the gate to matter more rather than less. `WebSearch` is
-dropped when local: a tool that can only fail is worse than an absent one, since
-Claude spends a step discovering that and then apologises about it out loud.
+model is a reason for the gate to matter more rather than less. `WebSearch` and
+`WebFetch` are dropped when local: a tool that can only fail is worse than an
+absent one, since Claude spends a step discovering that and then apologises
+about it out loud. The one widening that does exist, `brain.free_web` putting
+`WebSearch` on the child's allowlist so a question about the world is answered
+without a spoken yes, is switched off by the same `local` flag, and the local
+spawn gets a note appended to its prompt saying the web is gone, because the
+persona otherwise promises a search the model cannot make.
 
 ### When the CLI cannot run the turn at all
 

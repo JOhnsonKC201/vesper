@@ -74,6 +74,16 @@ def test_context_block_reads_the_clock_the_way_a_person_says_it():
     assert "Friday" in block and "14:05" in block
 
 
+def test_context_block_names_the_location_only_when_set():
+    """"What's the weather tomorrow" needs a place. Blank sends nothing rather
+    than "where: unknown", which the model would then ask about out loud."""
+    assert "where:" not in context_block(snap())
+    assert "where:" not in context_block(snap(), location="   ")
+    block = context_block(snap(), location="  Baltimore,  Maryland ")
+    assert "where: Baltimore, Maryland" in block
+    assert block.index("time:") < block.index("where:")
+
+
 # --- change detection -------------------------------------------------------
 
 

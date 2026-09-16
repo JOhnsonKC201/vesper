@@ -129,6 +129,14 @@ def test_a_web_fetch_names_the_host_it_is_reaching():
     assert "token=secret" in request.written()
 
 
+def test_a_web_search_question_names_the_search():
+    """Only asked with `brain.free_web` off. "Use WebSearch" was a tool name
+    read aloud; the search itself is what is being sent."""
+    request = ActionRequest("WebSearch", {"query": "ravens  score"})
+    assert request.spoken() == "search the web for ravens score"
+    assert ActionRequest("WebSearch", {}).spoken() == "search the web"
+
+
 def test_a_shell_command_is_described_by_its_verb():
     request = ActionRequest("Bash", {"command": "git commit -m 'wip'"})
     assert request.spoken() == "run git commit"
@@ -1090,6 +1098,18 @@ def test_nothing_in_the_default_allowlist_can_act_without_asking():
         for danger in banned:
             assert f"Bash({danger}" not in spec, spec
     assert "WebSearch" not in allowed, "sends text off the machine with no consent"
+
+
+def test_free_web_widens_the_child_and_not_the_list():
+    """The search runs without a question under a named switch, on the child's
+    allowlist. The configured list above keeps its rule, so the exception can
+    be found by name rather than by reading thirty entries."""
+    assert config_module.BrainSettings().free_web is True
+    assert "WebSearch" not in config_module.BrainSettings().allowed_tools
+    argv = BrainConfig(free_web=True, allowed_tools=("Read",)).argv()
+    assert argv[argv.index("--allowedTools") + 1] == "Read,WebSearch"
+    argv = BrainConfig(free_web=False, allowed_tools=("Read",)).argv()
+    assert argv[argv.index("--allowedTools") + 1] == "Read"
 
 
 # --- what a widened grant actually gets spent on ----------------------------

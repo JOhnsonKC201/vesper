@@ -408,6 +408,13 @@ class ActionRequest:
             if url:
                 return f"fetch {_speakable_url(url)} from the web"
             return "fetch a page from the web"
+        if self.tool == "WebSearch":
+            # Only asked when `brain.free_web` is off. "Use WebSearch" is a
+            # tool name read aloud; the search itself is what is being sent.
+            query = " ".join(str(self.tool_input.get("query") or "").split())
+            if query:
+                return f"search the web for {query}"
+            return "search the web"
         return f"use {self.tool}"
 
     def written(self) -> str:

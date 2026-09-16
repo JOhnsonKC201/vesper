@@ -28,6 +28,11 @@ class Identity:
     # Free text appended to the system prompt. The place to tell Vesper to be
     # funnier, terser, or to always call you by name.
     personality: str = ""
+    # Where you are, in your own words: "Baltimore", "Lagos, Nigeria". Rides in
+    # the context of every turn so "what's the weather tomorrow" needs no
+    # follow-up. Blank sends nothing. It goes wherever the conversation goes,
+    # so leave it blank if the city is more than you want to say.
+    location: str = ""
 
 
 @dataclass
@@ -41,8 +46,15 @@ class BrainSettings:
     # not usable until then: permission_mode below refuses anything missing
     # from allowed_tools.
     tools: tuple[str, ...] = (
-        "Bash", "Read", "Write", "Edit", "Grep", "Glob", "WebSearch",
+        "Bash", "Read", "Write", "Edit", "Grep", "Glob", "WebSearch", "WebFetch",
     )
+    # Whether a web search runs without a spoken question. This is the one
+    # thing that sends text off the machine without asking: the search, to
+    # Anthropic, the party that already holds the conversation. It is a named
+    # switch rather than an entry in `allowed_tools` so that list's rule stays
+    # whole and checkable. False, and every search is asked about out loud.
+    # Off offline either way, where the tool does not exist.
+    free_web: bool = True
     # Everything Vasper may do without asking. The rule for this list was "no
     # entry may be able to change anything", and it has been widened once,
     # deliberately, rather than quietly broken.
@@ -66,6 +78,8 @@ class BrainSettings:
     #   powershell -Command Get-*  a wildcard on an interpreter's argument
     # WebSearch came off too. It cannot touch the disk, but it sends text off
     # the machine, and "what leaves this machine" is a promise this list keeps.
+    # It now runs without a question under `free_web` above, on the child's
+    # allowlist rather than this one, so the exception has a name.
     #
     # `Bash(python*)` used to be here and had to come off: `python -c` writes
     # files, deletes them and reaches the network, so allowing it quietly
