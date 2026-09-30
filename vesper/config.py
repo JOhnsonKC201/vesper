@@ -39,6 +39,13 @@ class Identity:
 class BrainSettings:
     executable: str = "claude"
     model: str = "opus"
+    # How hard the cloud model thinks: low, medium, high, xhigh or max. Blank is
+    # the CLI's default. Lower is a faster first word; the measured trade per
+    # level is in config.yaml next to the setting. Never sent offline.
+    effort: str = ""
+    # A second model when the first is overloaded or not on the plan. The CLI
+    # retries the primary at the start of every turn. Never sent offline.
+    fallback_model: str = ""
     # Where Claude's shell starts. Home gives it reach across your projects.
     cwd: str = ""
     add_dirs: tuple[str, ...] = ()

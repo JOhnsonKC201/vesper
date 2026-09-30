@@ -104,6 +104,17 @@ def test_a_local_brain_is_told_it_cannot_look_things_up():
     assert _flag(cloud, "--system-prompt") == "Persona."
 
 
+def test_a_local_brain_is_never_sent_effort_or_a_fallback():
+    """Ollama has no opus to fall back to, and what it does with an effort
+    level nobody has measured. Both stay on the cloud spawn."""
+    local = _config(local=True, effort="high", fallback_model="opus").argv()
+    assert "--effort" not in local
+    assert "--fallback-model" not in local
+    cloud = _config(local=False, effort="high", fallback_model="opus").argv()
+    assert _flag(cloud, "--effort") == "high"
+    assert _flag(cloud, "--fallback-model") == "opus"
+
+
 def test_the_gate_is_untouched_by_going_local():
     """Offline is not a reason to act without asking."""
     for local in (True, False):

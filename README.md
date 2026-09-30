@@ -950,6 +950,8 @@ commented. The ones worth knowing:
 | `identity.personality` | Free text appended to the persona. The dial for how it feels. |
 | `identity.location` | Where you are, in your words. Rides in every turn's context so weather needs no follow-up. Blank sends nothing. |
 | `brain.free_web` | On by default: a web search runs without a spoken question. The one thing that leaves without asking. False to be asked every time. |
+| `brain.model` | `opus`, `sonnet` or `fable`. With `fable`, set `fallback_model: opus` in case the plan does not carry it. |
+| `brain.effort` | How hard the cloud model thinks: `low` to `max`, blank for the CLI default. Lower is a faster first word. Measure with `scripts/latency.py --effort low` before choosing. Never sent offline. |
 | `voice.speed` | Piper's natural pace reads slightly slow for conversation. |
 | `voice.choice` | Where the dashboard writes the voice you picked. It beats `model`, `character` and `eleven.voice_id`; delete the file to go back to the config. |
 | `voice.character` | `jarvis`, `broadcast`, or `natural` for Piper untouched. Compare with `python scripts/voice_ab.py`. |

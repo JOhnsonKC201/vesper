@@ -67,6 +67,10 @@ def verify(cfg, *, timeout_s: float = 60.0) -> GateResult:
         BrainConfig(
             executable=cfg.brain.executable,
             model=cfg.brain.model,
+            # The same model settings the real brain gets, so the probe proves
+            # the gate on the spawn that will actually run.
+            effort=cfg.brain.effort,
+            fallback_model=cfg.brain.fallback_model,
             cwd=cfg.brain_cwd(),
             system_prompt=PROBE_PROMPT,
             tools=tuple(cfg.brain.tools),

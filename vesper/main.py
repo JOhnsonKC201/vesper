@@ -29,7 +29,7 @@ from . import single
 from .audio.mic import Microphone
 from .audio.speaker import Speaker
 from .audio.vad import EndpointConfig
-from .brain.claude import BrainConfig, ClaudeBrain
+from .brain.claude import EFFORT_LEVELS, BrainConfig, ClaudeBrain
 from .brain.persona import OFFLINE_NOTE, build_system_prompt
 from .brain.session_store import SessionStore
 from .conversation import Conversation, ConversationConfig
@@ -180,10 +180,21 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
     voice, voice_label = build_voice(cfg, ui)
     speaker = Speaker(voice, on_start=ui.spoke, on_error=lambda e: ui.error(str(e)))
 
+    effort = (cfg.brain.effort or "").strip().lower()
+    if effort and effort not in EFFORT_LEVELS:
+        # Dropped rather than sent, so a typo cannot end the spawn. Said here,
+        # once, where the console and the log both see it.
+        ui.warn(
+            f"brain.effort {cfg.brain.effort!r} is not one of "
+            f"{', '.join(EFFORT_LEVELS)}; using the CLI default"
+        )
+
     brain = ClaudeBrain(
         BrainConfig(
             executable=cfg.brain.executable,
             model=cfg.brain.model,
+            effort=cfg.brain.effort,
+            fallback_model=cfg.brain.fallback_model,
             cwd=cfg.brain_cwd(),
             system_prompt=build_system_prompt(
                 cfg.identity.user, cfg.identity.personality, lessons.prompt_block()
