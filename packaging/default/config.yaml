@@ -135,6 +135,7 @@ brain:
     - "Bash(vasper read:*)"
     - "Bash(vasper focus:*)"
     - "Bash(vasper open:*)"
+    - "Bash(vasper calendar:*)"
     - "Bash(ipconfig:*)"
   turn_timeout_s: 180
   # Resume the previous conversation on startup, so it remembers yesterday.
