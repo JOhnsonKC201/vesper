@@ -47,7 +47,9 @@ def read_url(path: Path = URL_FILE) -> str:
     """The first non-blank, non-comment line of the address file."""
     if not path.exists():
         raise SyncError(f"no address yet: put the private iCal address in {path}")
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # utf-8-sig: Notepad can save with a byte order mark, which would otherwise
+    # sit in front of "https://" and fail the check below.
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
             # Google hands out webcal:// for subscribing; it is the same file.
@@ -134,6 +136,12 @@ def main(argv: list[str] | None = None) -> int:
         size = sync()
     except SyncError as exc:
         print(f"calendar sync failed: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        # Most often the file is open in `vasper calendar` at that moment. The
+        # next run in 15 minutes tries again; this only keeps it from being a
+        # traceback in a window nobody sees.
+        print(f"calendar sync failed: could not write the file ({type(exc).__name__})", file=sys.stderr)
         return 1
     print(f"calendar synced: {size} bytes to {OUT_FILE}")
     return 0

@@ -104,3 +104,23 @@ def test_the_package_never_reads_the_address_file():
         if "calendar_url" in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
+
+
+def test_an_address_saved_by_notepad_with_a_bom_is_read(tmp_path):
+    path = tmp_path / "calendar_url.txt"
+    path.write_bytes(b"\xef\xbb\xbf" + SECRET.encode())
+    assert sync.read_url(path) == SECRET
+
+
+def test_a_locked_output_file_is_a_clean_failure(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sync, "URL_FILE", _url_file(tmp_path))
+    monkeypatch.setattr(sync, "OUT_FILE", tmp_path / "calendar.ics")
+    monkeypatch.setattr(sync, "fetch", lambda url: ICS)
+
+    def locked(body, out=None):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(sync, "write_atomically", locked)
+    monkeypatch.setattr(sync, "sync", lambda: sync.write_atomically(ICS) or 0)
+    assert sync.main([]) == 1
+    assert "calendar sync failed" in capsys.readouterr().err
