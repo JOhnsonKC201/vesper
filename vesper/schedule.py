@@ -58,17 +58,34 @@ def resolve_day(word: str, today: date) -> date:
     return date.fromisoformat(word)
 
 
-def _local_tz() -> tzinfo:
-    return datetime.now().astimezone().tzinfo
+def _localize(value: datetime, tz: tzinfo | None) -> datetime:
+    """An aware local datetime. With no `tz`, the system zone AS IT IS ON THAT
+    DATE: `astimezone()` with no argument looks the offset up per instant, so a
+    November event is not shown with October's daylight saving offset. A
+    naive value (a floating time, or a midnight built here) is local time."""
+    if tz is None:
+        return value.astimezone()
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=tz)
+    return value.astimezone(tz)
 
 
-def _as_local(value, tz: tzinfo) -> tuple[datetime, bool]:
+def _as_local(value, tz: tzinfo | None) -> tuple[datetime, bool]:
     """A DTSTART or DTEND value as a local datetime, and whether it was a date."""
     if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=tz)
-        return value.astimezone(tz), False
-    return datetime(value.year, value.month, value.day, tzinfo=tz), True
+        return _localize(value, tz), False
+    return _localize(datetime(value.year, value.month, value.day), tz), True
+
+
+def occurs_on(event: "Event", day: date) -> bool:
+    """Does the event take up any of this day? A DTEND is exclusive, so an
+    event ending at midnight, or an all-day event's next-day DTEND, does not
+    spill onto the following day."""
+    first = event.start.date()
+    if event.end <= event.start:
+        return day == first
+    last = (event.end - timedelta(microseconds=1)).date()
+    return first <= day <= last
 
 
 def events_on(path: Path, first: date, days: int = 1, tz: tzinfo | None = None) -> list[Event]:
@@ -76,10 +93,10 @@ def events_on(path: Path, first: date, days: int = 1, tz: tzinfo | None = None) 
     import icalendar
     import recurring_ical_events
 
-    tz = tz or _local_tz()
     days = clamp_days(days)
-    start = datetime(first.year, first.month, first.day, tzinfo=tz)
-    end = start + timedelta(days=days)
+    midnight = datetime(first.year, first.month, first.day)
+    start = _localize(midnight, tz)
+    end = _localize(midnight + timedelta(days=days), tz)
     calendar = icalendar.Calendar.from_ical(Path(path).read_bytes())
     found = []
     for component in recurring_ical_events.of(calendar).between(start, end):
@@ -125,13 +142,16 @@ def render(
     for offset in range(clamp_days(days)):
         day = first + timedelta(days=offset)
         lines.append(day.strftime("%a %b %d").replace(" 0", " "))
-        todays = [e for e in events if e.start.date() == day]
+        todays = [e for e in events if occurs_on(e, day)]
         if not todays:
             lines.append("  nothing scheduled")
         for event in todays:
-            when = "all day" if event.all_day else (
-                f"{event.start:%H:%M}-{event.end:%H:%M}"
-            )
+            if event.all_day:
+                when = "all day"
+            elif event.start.date() < day:
+                when = f"until {event.end:%H:%M}" if event.end.date() == day else "all day"
+            else:
+                when = f"{event.start:%H:%M}-{event.end:%H:%M}"
             where = f" ({event.location})" if event.location else ""
             lines.append(f"  {when}  {event.summary}{where}")
     return "\n".join(lines)

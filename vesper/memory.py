@@ -44,7 +44,9 @@ ALL_BELOW = 8
 # The most facts one turn gets.
 MAX_RETURNED = 6
 
-_REMEMBER_LINE = re.compile(r"^\s*remember\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+# Horizontal space only after the colon: `\s` would cross a line break and
+# store whatever the next screen line happened to be.
+_REMEMBER_LINE = re.compile(r"^[ \t]*remember[ \t]*:[ \t]*(\S.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
 
 _SECRET = re.compile(
     r"\b(password|passcode|passwd|api ?key|token|secret|pin code|ssn|"
@@ -121,14 +123,22 @@ class Facts:
             # Vasper from starting. The next save replaces it.
             return []
         rows = data.get("facts") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            return []
         facts = []
-        for row in rows or []:
-            if isinstance(row, dict) and isinstance(row.get("text"), str):
-                text = row["text"].strip()
-                # The same rules on the way in as on the way out of a turn: a
-                # file edited by hand does not get to skip them.
-                if not refusal(text):
-                    facts.append(Fact(text, float(row.get("created") or 0.0)))
+        for row in rows:
+            if not (isinstance(row, dict) and isinstance(row.get("text"), str)):
+                continue
+            text = row["text"].strip()
+            # The same rules on the way in as on the way out of a turn: a file
+            # edited by hand does not get to skip them.
+            if refusal(text):
+                continue
+            try:
+                created = float(row.get("created") or 0.0)
+            except (TypeError, ValueError):
+                created = 0.0
+            facts.append(Fact(text, created))
         return facts[-self.max_items:]
 
     def _save(self) -> None:

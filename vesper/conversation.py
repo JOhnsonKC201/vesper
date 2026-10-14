@@ -1563,7 +1563,13 @@ class Conversation:
             return
         _, screen = split_channels(reply)
         for line in memory.extract_facts(screen):
-            kept = self.facts.add(line)
+            try:
+                kept = self.facts.add(line)
+            except OSError as exc:
+                # A locked or read-only file must not cost the rest of the
+                # turn: this runs before the last sentence is spoken.
+                self.ui.warn(f"could not save a fact ({type(exc).__name__}): {line[:80]}")
+                return
             if kept is not None:
                 self.ui.info(f"noted: {kept.text}")
             elif memory.refusal(line):
