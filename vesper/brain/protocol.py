@@ -144,7 +144,9 @@ def tool_detail(name: str, tool_input: dict) -> str:
     """One short human phrase describing a tool call, for the terminal."""
     if not isinstance(tool_input, dict):
         return ""
-    for key in ("command", "file_path", "pattern", "query", "url", "path"):
+    # `description` last: the Agent tool's short label, which also rides along
+    # on Bash calls, where the command itself says more.
+    for key in ("command", "file_path", "pattern", "query", "url", "path", "description"):
         value = tool_input.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()[:160]
@@ -248,6 +250,10 @@ class StreamParser:
             return
 
         if kind == "stream_event":
+            # A subagent's own words are a working note for the main agent, not
+            # something to say out loud. Only the main agent speaks.
+            if frame.get("parent_tool_use_id"):
+                return
             event = frame.get("event") or {}
             if event.get("type") == "content_block_delta":
                 delta = event.get("delta") or {}
