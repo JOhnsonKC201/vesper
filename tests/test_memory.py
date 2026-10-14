@@ -196,3 +196,39 @@ def test_forget_that_drops_a_fact_when_it_is_the_newest(tmp_path):
     conv.lessons = Lessons(tmp_path / "lessons.json")
     assert conv._handle_local("forget that") is True
     assert conv.facts.items == []
+
+
+# --- found in review, 2026-10-14 ---------------------------------------------
+
+
+def test_a_bare_remember_line_does_not_swallow_the_next_line():
+    assert extract_facts("remember:\nmain.py:40") == []
+
+
+def test_a_hand_edited_file_with_bad_rows_still_loads(tmp_path):
+    path = tmp_path / "facts.json"
+    path.write_text(json.dumps({"facts": [
+        {"text": "Maya is the user's sister", "created": "yesterday"},
+        "not a row",
+        {"text": "the user's exam is on Friday", "created": 5},
+    ]}), encoding="utf-8")
+    assert [f.text for f in Facts(path).items] == [
+        "Maya is the user's sister", "the user's exam is on Friday",
+    ]
+
+
+def test_a_facts_value_that_is_not_a_list_loads_empty(tmp_path):
+    path = tmp_path / "facts.json"
+    path.write_text(json.dumps({"facts": 7}), encoding="utf-8")
+    assert Facts(path).items == []
+
+
+def test_a_save_that_fails_does_not_end_the_turn(tmp_path, monkeypatch):
+    conv, brain, voice, ui = _talk(tmp_path, ["Got it. <screen>remember: Maya is John's sister</screen> Anything else?"], [])
+
+    def locked(self):
+        raise PermissionError("locked by another process")
+
+    monkeypatch.setattr(Facts, "_save", locked)
+    conv._keep_facts("<screen>remember: Maya is John's sister</screen>")
+    assert any("could not save" in line for line in ui.warnings)
