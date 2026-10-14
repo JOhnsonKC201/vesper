@@ -136,3 +136,51 @@ def test_vasper_calendar_prints_the_synced_file(tmp_path, monkeypatch, capsys):
 def test_vasper_calendar_refuses_a_day_it_cannot_read(capsys):
     assert tool.main(["calendar", "someday"]) == 2
     assert "not a day" in capsys.readouterr().out
+
+
+# --- found in review, 2026-10-14 ---------------------------------------------
+
+OVERNIGHT = ICS.replace("END:VCALENDAR", """BEGIN:VEVENT
+UID:night@test
+DTSTART;TZID=America/New_York:20261013T220000
+DTEND;TZID=America/New_York:20261014T020000
+SUMMARY:Overnight run
+END:VEVENT
+BEGIN:VEVENT
+UID:trip@test
+DTSTART;VALUE=DATE:20261013
+DTEND;VALUE=DATE:20261016
+SUMMARY:Conference trip
+END:VEVENT
+BEGIN:VEVENT
+UID:nov@test
+DTSTART;TZID=America/New_York:20261102T100000
+DTEND;TZID=America/New_York:20261102T110000
+SUMMARY:After the clocks change
+END:VEVENT
+END:VCALENDAR""")
+
+
+def test_an_event_still_running_shows_on_the_day_it_runs_into(tmp_path):
+    text = cal.render(_file(tmp_path, OVERNIGHT), date(2026, 10, 14), days=1, tz=EASTERN)
+    assert "Overnight run" in text
+
+
+def test_a_multi_day_event_shows_on_every_day_but_not_past_its_end(tmp_path):
+    path = _file(tmp_path, OVERNIGHT)
+    for day in (13, 14, 15):
+        assert "Conference trip" in cal.render(path, date(2026, 10, day), days=1, tz=EASTERN)
+    assert "Conference trip" not in cal.render(path, date(2026, 10, 16), days=1, tz=EASTERN)
+
+
+def test_times_after_the_clocks_change_use_that_dates_offset(tmp_path):
+    """With no zone given, each time is converted with the system zone as it
+    is on that date. Freezing today's offset put every November event an hour
+    off on this machine, which is on Eastern time and changes on Nov 1."""
+    from datetime import timezone
+
+    events = cal.events_on(_file(tmp_path, OVERNIGHT), date(2026, 11, 2), days=1)
+    nov = [e for e in events if e.summary == "After the clocks change"][0]
+    expected = datetime(2026, 11, 2, 15, 0, tzinfo=timezone.utc).astimezone()
+    assert nov.start == expected
+    assert (nov.start.hour, nov.start.utcoffset()) == (expected.hour, expected.utcoffset())
