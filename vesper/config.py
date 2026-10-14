@@ -62,6 +62,10 @@ class BrainSettings:
     # whole and checkable. False, and every search is asked about out loud.
     # Off offline either way, where the tool does not exist.
     free_web: bool = True
+    # Whether one request may be split across parallel subagents ("check the
+    # weather in Boston and in Tokyo"). Cloud only. Adds no permission: every
+    # tool a subagent calls is asked about exactly as if Vasper called it.
+    subagents: bool = True
     # Everything Vasper may do without asking. The rule for this list was "no
     # entry may be able to change anything", and it has been widened once,
     # deliberately, rather than quietly broken.

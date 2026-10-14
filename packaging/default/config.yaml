@@ -74,6 +74,11 @@ brain:
   # and every search is asked about out loud, like a file write. WebFetch,
   # which reads one page from this machine, always asks and names the site.
   free_web: true
+  # One request can be split across parallel subagents, so "weather in Boston
+  # and in Tokyo" is two lookups at once instead of one after the other. Cloud
+  # only, and it adds no permission: anything a subagent tries that is not
+  # allowed below is still a spoken question. Each subagent is billed turns.
+  subagents: true
   # manual is what makes any of this real. In the CLI default (auto) a file
   # write under the working directory happens with no announcement at all.
   permission_mode: manual

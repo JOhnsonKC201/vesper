@@ -51,6 +51,9 @@ _LOCAL_TOKEN = "ollama"
 # fail, and the first is the one `free_web` lets run without a question.
 _WEB_TOOLS = ("WebSearch", "WebFetch")
 
+# The CLI's built-in tool for handing part of a request to a subagent.
+_AGENT_TOOL = "Agent"
+
 # What `--effort` accepts, per `claude --help` on 2.1.273. Anything else is
 # dropped rather than sent: a typo in config.yaml must not kill the spawn.
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
@@ -79,6 +82,12 @@ def child_env(config: "BrainConfig | None" = None) -> dict:
         if not name.upper().startswith(_PRIVATE_ENV_PREFIX)
     }
     env["PYTHONIOENCODING"] = "utf-8"
+    # Subagents launched together otherwise run in the background: the turn
+    # ends on "still working" and the real answer arrives as a second `result`
+    # after Vesper has already finished speaking. Measured 2026-10-13. Set
+    # whether or not subagents are on, since a background shell has the same
+    # shape and Vesper can never be listening for it.
+    env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
     # `vasper` is Vasper's own hands (vesper/tool.py, via vasper.cmd). The brain
     # runs with cwd set to the home directory, so without this the shim is not
     # on any path it can reach and every call comes back "not recognized".
@@ -163,6 +172,14 @@ class BrainConfig:
     # the dashboard tell the user it is offline; until this, nothing told the
     # model, and a 3B model that thinks it can search apologises at length.
     offline_note: str = ""
+    # Whether Claude may split one request into parallel subagents through the
+    # CLI's built-in Agent tool. Cloud only. The tool itself needs no grant, and
+    # every tool a subagent calls is refused or allowed by the same gate as the
+    # main agent's: measured, see tests/test_subagents.py.
+    subagents: bool = False
+    # Appended to the system prompt when the Agent tool is present, and only
+    # then, so the persona never describes a tool this spawn does not have.
+    subagents_note: str = ""
     add_dirs: tuple[str, ...] = ()
     turn_timeout_s: float = 180.0
     # `manual` is what makes the allowlist mean anything. Measured against the
@@ -214,16 +231,21 @@ class BrainConfig:
         can only fail, and a tool that always fails is worse than an absent one:
         Claude spends a step discovering it, then apologises about it out loud.
         """
-        if not self.local:
-            return self.tools
-        return tuple(t for t in self.tools if t not in _WEB_TOOLS)
+        if self.local:
+            return tuple(t for t in self.tools if t not in _WEB_TOOLS + (_AGENT_TOOL,))
+        if self.subagents and _AGENT_TOOL not in self.tools:
+            return self.tools + (_AGENT_TOOL,)
+        return self.tools
 
     def prompt_for_spawn(self) -> str:
-        """The system prompt, plus the offline note when this spawn is local."""
-        note = (self.offline_note or "").strip()
-        if self.local and note:
-            return f"{self.system_prompt}\n\n{note}"
-        return self.system_prompt
+        """The system prompt, plus whichever notes describe this spawn's tools."""
+        notes = []
+        if self.local:
+            notes.append(self.offline_note)
+        if self.subagents and _AGENT_TOOL in self.usable_tools():
+            notes.append(self.subagents_note)
+        notes = [n.strip() for n in notes if (n or "").strip()]
+        return "\n\n".join([self.system_prompt, *notes])
 
     def argv(self, resume_session: str = "", grants: tuple[str, ...] = ()) -> list[str]:
         args = [

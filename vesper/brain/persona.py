@@ -438,6 +438,24 @@ OFFLINE_NOTE = (
     "that it is from memory."
 )
 
+# Appended to the persona only when the spawn has the Agent tool (cloud, and
+# `brain.subagents` on). The built-in `Explore` subagent is read only; a
+# `general-purpose` one can try anything, and the gate still asks out loud.
+# Background runs are off in the child, so every subagent finishes inside the
+# turn and one question still gets one spoken answer.
+# A subagent costs about a turn of its own, so the note keeps it for requests
+# with separate parts that each need real looking, never a single search.
+SUBAGENTS_NOTE = (
+    "SUBAGENTS\n"
+    "When one request has two or more separate parts that each need real "
+    "looking up or reading, such as the weather in two cities or what changed "
+    "in two projects, hand each part to its own subagent with the Agent tool, "
+    "all in one message so they run at the same time. Use the Explore type: it "
+    "only reads. Never use a subagent for a single search, a single file, or "
+    "anything you can answer at once. Do it silently, the same as a search, "
+    "and answer once with everything together in one or two sentences."
+)
+
 INTERRUPTED_NOTE = (
     "[system] The user talked over you, so they did not hear the rest of your "
     "last answer. Do not repeat it unless they ask. Just respond to what they "

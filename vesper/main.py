@@ -30,7 +30,7 @@ from .audio.mic import Microphone
 from .audio.speaker import Speaker
 from .audio.vad import EndpointConfig
 from .brain.claude import EFFORT_LEVELS, BrainConfig, ClaudeBrain
-from .brain.persona import OFFLINE_NOTE, build_system_prompt
+from .brain.persona import OFFLINE_NOTE, SUBAGENTS_NOTE, build_system_prompt
 from .brain.session_store import SessionStore
 from .conversation import Conversation, ConversationConfig
 from .learning import Lessons
@@ -203,6 +203,8 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
             allowed_tools=tuple(cfg.brain.allowed_tools),
             free_web=bool(cfg.brain.free_web),
             offline_note=OFFLINE_NOTE,
+            subagents=bool(cfg.brain.subagents),
+            subagents_note=SUBAGENTS_NOTE,
             add_dirs=tuple(cfg.brain.add_dirs),
             turn_timeout_s=cfg.brain.turn_timeout_s,
             permission_mode=cfg.brain.permission_mode,
