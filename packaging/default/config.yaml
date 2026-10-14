@@ -329,6 +329,10 @@ runtime:
   # "forget that" to drop the last one, "forget everything" to clear it.
   # Blank disables it and he forgets at every restart, as he used to.
   lessons: var/lessons.json
+  # Facts about you picked up in conversation, shown on the dashboard as they
+  # are kept and handed back when a question touches them. Blank turns it off.
+  # "Forget that" drops the newest fact or lesson, whichever came last.
+  facts: var/facts.json
   # Whether the log keeps the words, or only the fact that something was heard.
   #
   # Everything the microphone picks up is transcribed, addressed to him or not.

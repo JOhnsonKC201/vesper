@@ -289,6 +289,9 @@ class RuntimeSettings:
     # Instructions you have given him that should outlive the session. Blank
     # disables learning entirely and he forgets at every restart, as before.
     lessons: str = "var/lessons.json"
+    # Facts about you that Vasper picks up in conversation ("my exam is
+    # Friday") and hands back when a question touches them. Blank turns it off.
+    facts: str = "var/facts.json"
     # Whether the words themselves go into the log, or only the fact that
     # something was heard. Everything the microphone picks up is transcribed,
     # addressed to Vesper or not: one week of a real log holds 975 of them, and
@@ -345,6 +348,9 @@ class Config:
 
     def lessons_path(self) -> Path | None:
         return self._under_root(self.runtime.lessons)
+
+    def facts_path(self) -> Path | None:
+        return self._under_root(self.runtime.facts)
 
     def voice_cache_path(self) -> Path | None:
         return self._under_root(self.voice.eleven.cache_dir)
