@@ -27,11 +27,12 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
-from . import audit, learning, register
+from . import audit, learning, memory, register
 from .brain import failures
 from .audio.mic import Microphone
 from .audio.speaker import Speaker
@@ -150,6 +151,15 @@ def _matches(text: str, phrases: tuple[str, ...]) -> bool:
     return any(stripped == p or stripped.startswith(p + " ") for p in phrases)
 
 
+def _lesson_time(lesson) -> float:
+    """When a lesson was last given, as epoch seconds; 0 when unknown."""
+    stamp = getattr(lesson, "last", "") or getattr(lesson, "created", "")
+    try:
+        return datetime.fromisoformat(stamp).timestamp() if stamp else 0.0
+    except ValueError:
+        return 0.0
+
+
 def _without_refusal_noise(text: str) -> str:
     """Drop whole sentences that only restate a refusal, keep the rest."""
     if not text.strip():
@@ -204,6 +214,9 @@ class ConversationConfig:
     # Spoken in the greeting. Hardcoded until the name became a
     # setting, at which point it introduced itself as the wrong one.
     name: str = "Vasper"
+    # Who Vasper is talking to, for the "what you know about" line. Mirrors
+    # identity.user.
+    user: str = "the user"
     # Where the user is, in their words, for the context of every turn. Blank
     # sends nothing. Mirrors identity.location.
     location: str = ""
@@ -309,6 +322,7 @@ class Conversation:
         # Instructions worth keeping across restarts. None disables it and
         # Vesper forgets everything at every restart, as he used to.
         self.lessons = None  # set by main when learning is on
+        self.facts = None  # set by main when runtime.facts is on
         self.learned = 0
         # Whether the last utterance was confirmed as the enrolled voice.
         # Typed input sets it true: someone at the keyboard is the owner.
@@ -1470,14 +1484,16 @@ class Conversation:
             self._hands_off()
             return True
 
-        forget = learning.wants_forgetting(text) if self.lessons is not None else ""
+        remembers = self.lessons is not None or self.facts is not None
+        forget = learning.wants_forgetting(text) if remembers else ""
         if forget == "all":
-            count = self.lessons.forget_all()
+            count = self.lessons.forget_all() if self.lessons is not None else 0
+            count += self.facts.forget_all() if self.facts is not None else 0
             self._say("Forgotten. All of it." if count else "There was nothing to forget.")
             return True
         if forget == "last":
-            dropped = self.lessons.forget_last()
-            self._say(f"Forgotten: {dropped.text}." if dropped
+            dropped = self._forget_newest()
+            self._say(f"Forgotten: {dropped}." if dropped
                       else "There was nothing to forget.")
             return True
 
@@ -1511,6 +1527,36 @@ class Conversation:
             self.shutdown()
             return True
         return False
+
+    def _keep_facts(self, reply: str) -> None:
+        """Store the `remember:` lines of a finished reply.
+
+        Read from the CLI's final text rather than the stream, so a turn that
+        arrived without partial messages is covered too. The lines were already
+        printed with the rest of the screen block; this only says which were kept.
+        """
+        if self.facts is None or not reply:
+            return
+        _, screen = split_channels(reply)
+        for line in memory.extract_facts(screen):
+            kept = self.facts.add(line)
+            if kept is not None:
+                self.ui.info(f"noted: {kept.text}")
+            elif memory.refusal(line):
+                self.ui.info(f"not kept ({memory.refusal(line)}): {line[:80]}")
+
+    def _forget_newest(self) -> str:
+        """Drop whichever was kept last, a fact or a lesson. "" when neither."""
+        lessons = self.lessons.items if self.lessons is not None else []
+        lesson_at = _lesson_time(lessons[-1]) if lessons else 0.0
+        fact_at = self.facts.newest if self.facts is not None else 0.0
+        if self.facts is not None and fact_at and fact_at >= lesson_at:
+            dropped = self.facts.forget_last()
+            return dropped.text if dropped else ""
+        if self.lessons is not None:
+            dropped = self.lessons.forget_last()
+            return dropped.text if dropped else ""
+        return ""
 
     def _maybe_learn(self, text: str) -> None:
         """Keep a standing instruction, then answer it anyway.
@@ -1610,6 +1656,10 @@ class Conversation:
             sensors.context_block(now, location=self.config.location),
             self.register.line(),
         )
+        if self.facts is not None:
+            known = self.facts.context_block(text, user=self.config.user)
+            if known:
+                context = f"{context.rstrip()}\n{known}".strip()
         self.register.note_turn(now.window.process)
         payload = frame_turn(text, context)
         # From the words as spoken, not the framed payload: the context block
@@ -1887,6 +1937,7 @@ class Conversation:
                         events.close()
                         self._failed_turn(event, kind, payload, granted, retried)
                         return
+                    self._keep_facts(event.text)
 
                     spoken_tail, screen_tail = router.flush()
                     for sentence in assembler.feed(spoken_tail):

@@ -34,6 +34,7 @@ from .brain.persona import OFFLINE_NOTE, SUBAGENTS_NOTE, build_system_prompt
 from .brain.session_store import SessionStore
 from .conversation import Conversation, ConversationConfig
 from .learning import Lessons
+from .memory import Facts
 from .logfile import LogFile, attach
 from .proactive import ProactiveConfig, ProactiveLoop
 from .stt.voiceprint import VoicePrint
@@ -174,6 +175,7 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
     # Built before the brain, because what he has learned goes into the
     # system prompt and the prompt is fixed for the life of the process.
     lessons = Lessons(cfg.lessons_path())
+    facts = Facts(cfg.facts_path()) if cfg.runtime.facts else None
     if lessons.active() or lessons.dropped_on_load:
         ui.info(lessons.summary())
 
@@ -198,7 +200,8 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
             fallback_model=cfg.brain.fallback_model,
             cwd=cfg.brain_cwd(),
             system_prompt=build_system_prompt(
-                cfg.identity.user, cfg.identity.personality, lessons.prompt_block()
+                cfg.identity.user, cfg.identity.personality, lessons.prompt_block(),
+                memory=facts is not None,
             ),
             tools=tuple(cfg.brain.tools),
             allowed_tools=tuple(cfg.brain.allowed_tools),
@@ -269,6 +272,7 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
             self_mute_ms=cfg.listening.self_mute_ms,
             greet_on_start=cfg.ui.greet_on_start,
             name=cfg.identity.name,
+            user=cfg.identity.user,
             location=cfg.identity.location,
             consent_enabled=cfg.consent.enabled,
             consent_window_s=cfg.consent.window_s,
@@ -286,6 +290,7 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
     # The same store the prompt was built from, so "forget that" removes the
     # line Claude was actually given rather than a second copy of it.
     conversation.lessons = lessons if cfg.runtime.lessons else None
+    conversation.facts = facts
     conversation.voiceprint = VoicePrint(cfg.voiceprint_path())
     conversation.log = log
 
