@@ -33,6 +33,9 @@ def test_only_looking_and_visible_changes_are_free():
         "Bash(vasper read:*)",
         "Bash(vasper focus:*)",
         "Bash(vasper open:*)",
+        # Looking, at a file: it prints var/calendar.ics and touches nothing.
+        # The download lives outside the package in scripts/calendar_sync.py.
+        "Bash(vasper calendar:*)",
     }
 
 

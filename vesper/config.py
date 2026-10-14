@@ -136,6 +136,9 @@ class BrainSettings:
         "Bash(vasper read:*)",
         "Bash(vasper focus:*)",
         "Bash(vasper open:*)",
+        # Reads var/calendar.ics and nothing else. The download is a separate
+        # script outside the package; this only prints a local file.
+        "Bash(vasper calendar:*)",
         "Bash(date:*)",
         "Bash(whoami:*)",
         "Bash(hostname:*)",

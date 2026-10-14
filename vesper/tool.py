@@ -55,6 +55,8 @@ SHOTS = ROOT / "var" / "shots"
 # The app list, cached between runs because `vasper` is a fresh process
 # every time and rebuilding it costs 0.66s. See `installed_apps`.
 APP_INDEX = ROOT / "var" / "apps.json"
+# Written by scripts/calendar_sync.py; only ever read here.
+CALENDAR = ROOT / "var" / "calendar.ics"
 # A ceiling on how stale the index may get. `_menus_stamp` cannot see a
 # shortcut added to an existing subfolder, or anything at all in the shell
 # AppsFolder, so without this an app installed today could stay missing from
@@ -420,6 +422,20 @@ def cmd_windows(args) -> int:
         return 0
     for w in windows:
         print(f"{w.handle}\t{w.process}\t{_safe_title(w.title)}")
+    return 0
+
+
+def cmd_calendar(args) -> int:
+    from datetime import date
+
+    from . import schedule
+
+    try:
+        first = schedule.resolve_day(args.day, date.today())
+    except ValueError:
+        print(f"not a day: {args.day!r}. Use today, tomorrow, a weekday, or YYYY-MM-DD")
+        return 2
+    print(schedule.render(CALENDAR, first, days=args.days))
     return 0
 
 
@@ -822,6 +838,13 @@ def build_parser() -> argparse.ArgumentParser:
     scroll.set_defaults(run=cmd_scroll)
 
     subs.add_parser("windows", help="list visible windows").set_defaults(run=cmd_windows)
+
+    calendar = subs.add_parser(
+        "calendar", help="your calendar from the last sync: today, tomorrow, a weekday or a date"
+    )
+    calendar.add_argument("day", nargs="?", default="today")
+    calendar.add_argument("--days", type=int, default=1, help="how many days from that one")
+    calendar.set_defaults(run=cmd_calendar)
 
     apps = subs.add_parser("apps", help="list or search installed apps")
     apps.add_argument("query", nargs="?", default="")
