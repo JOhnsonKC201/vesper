@@ -440,6 +440,10 @@ class Conversation:
                 # console on screen. They will notice the answers got shallower;
                 # this is what stops that being a mystery.
                 greeting += " I'm offline, running on this machine."
+            stale = self._stale_voice_line()
+            if stale:
+                self.ui.warn("the voice profile predates calibration and cannot tell you from anyone else")
+                greeting += " " + stale
             self.speaker.say(greeting)
 
     def _warm(self, what: str, load) -> threading.Thread:
@@ -1073,6 +1077,25 @@ class Conversation:
         if self.voiceprint.adapt(audio):
             self.ui.info(f"learned a little more of your voice ({score:.2f})")
 
+    def _stale_voice_line(self) -> str:
+        """The spoken nudge for a profile recorded before calibration, or "".
+
+        Such a profile scores against one averaged centroid with the old 0.55
+        guess for a bar, which its owner never reached. Nothing short of
+        recording it again fixes that, so this says how, every launch, until
+        it is done. Never enrolled is left alone: that one answers everyone,
+        which is the documented choice, not a fault.
+        """
+        if self.voiceprint is None or not self.voiceprint.enrolled:
+            return ""
+        if self.voiceprint.profile.calibrated:
+            return ""
+        return (
+            "One thing: my copy of your voice is out of date, so I can't tell "
+            "you from anyone else. Double-click Teach Vesper my voice on the "
+            "desktop when you have a minute."
+        )
+
     def _maybe_warn_about_voice(self) -> None:
         """Say once, out loud in the log, that the profile is not working.
 
@@ -1088,7 +1111,8 @@ class Conversation:
         self._warned_about_voice = True
         self.ui.warn(
             f"the voice profile has not matched you once in {self.voice_scored} "
-            f"utterances. Run --voicecheck: it may be ignoring you."
+            f"utterances. Run --voicecheck to see why, then double-click Teach "
+            f"Vesper my voice on the desktop (or run.bat --enroll) to record it again."
         )
 
     def _repeats_the_last_question(self, text: str) -> bool:
