@@ -194,6 +194,7 @@ def build(cfg: config_module.Config, *, with_mic: bool = True, verbose: bool = F
             executable=cfg.brain.executable,
             model=cfg.brain.model,
             effort=cfg.brain.effort,
+            adaptive_effort=bool(cfg.brain.adaptive_effort),
             fallback_model=cfg.brain.fallback_model,
             cwd=cfg.brain_cwd(),
             system_prompt=build_system_prompt(

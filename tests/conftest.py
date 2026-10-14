@@ -118,6 +118,9 @@ class FakeBrain:
         self.standing_revoked = True
         self.standing = ()
 
+    def set_effort_for(self, utterance):
+        self.effort_for = utterance
+
     def ask(self, text):
         self.asked.append(text)
         self.interrupted.clear()

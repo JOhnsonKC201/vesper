@@ -1612,6 +1612,9 @@ class Conversation:
         )
         self.register.note_turn(now.window.process)
         payload = frame_turn(text, context)
+        # From the words as spoken, not the framed payload: the context block
+        # would make every question look long.
+        self.brain.set_effort_for(text)
         if self.hands_standing:
             # They said yes once, to the session. No question and no respawn:
             # the allowlist already carries the hands, the note only says so.

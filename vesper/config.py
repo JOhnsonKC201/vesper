@@ -43,6 +43,10 @@ class BrainSettings:
     # the CLI's default. Lower is a faster first word; the measured trade per
     # level is in config.yaml next to the setting. Never sent offline.
     effort: str = ""
+    # Each question picks its own effort: low for "what time is it", high for
+    # "why" and "plan", max for "think hard". `effort` above stays the level
+    # for anything the rules do not decide. Cloud only.
+    adaptive_effort: bool = True
     # A second model when the first is overloaded or not on the plan. The CLI
     # retries the primary at the start of every turn. Never sent offline.
     fallback_model: str = ""

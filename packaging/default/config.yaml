@@ -36,6 +36,12 @@ brain:
   # the summary line. Never sent offline. A value the CLI does not know is
   # dropped with a warning rather than sent, so a typo cannot end the spawn.
   effort: ""
+  # Let each question choose its own effort instead: low for a quick one
+  # ("what time is it", "open chrome"), high for one that needs reasoning
+  # ("why", "plan", "compare"), max when you say "think hard". The effort
+  # above is used for everything in between. Switched inside the running
+  # session, so it costs no restart.
+  adaptive_effort: true
   # A second model to try when the first is overloaded or not on your plan.
   # The CLI retries the primary at the start of every turn. Never sent offline.
   fallback_model: ""
