@@ -29,3 +29,8 @@ pywinauto>=0.6.9
 # Input + terminal UI
 pynput>=1.7.6
 rich>=13.7
+
+# Calendar: parse var/calendar.ics (synced by scripts/calendar_sync.py),
+# including recurring events. Pure Python, no native libs.
+icalendar>=6.0
+recurring-ical-events>=3.3
