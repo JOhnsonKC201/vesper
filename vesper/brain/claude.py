@@ -27,6 +27,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from .effort import choose_effort, effort_request
 from .protocol import BrainError, Event, StreamParser, TurnComplete, encode_user_message
 
 # Vesper's own secrets, which the child has no use for and every ability to
@@ -180,6 +181,10 @@ class BrainConfig:
     # Appended to the system prompt when the Agent tool is present, and only
     # then, so the persona never describes a tool this spawn does not have.
     subagents_note: str = ""
+    # Whether each question picks its own effort (vesper/brain/effort.py)
+    # instead of every turn running at `effort`. Cloud only. `effort` stays the
+    # level for questions the rules do not decide, and the level at spawn.
+    adaptive_effort: bool = False
     add_dirs: tuple[str, ...] = ()
     turn_timeout_s: float = 180.0
     # `manual` is what makes the allowlist mean anything. Measured against the
@@ -322,6 +327,12 @@ class ClaudeBrain:
         # ends. Both empty is the resting state and the safe one.
         self._grants: tuple[str, ...] = ()
         self._standing: tuple[str, ...] = ()
+        # The effort the running process is at, and the one the next question
+        # wants. `None` wanted means "no opinion": notes and proactive remarks
+        # go through `ask` too, and must not move the dial.
+        self._effort_now: str = self.config.effort_level()
+        self._effort_wanted: str | None = None
+        self._effort_requests: int = 0
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -407,6 +418,7 @@ class ClaudeBrain:
             return
         argv = self.config.argv(self.session_id if resume else "", self.grants)
         self._log("spawning brain: " + loggable_argv(argv))
+        self._reset_effort()
 
         env = self._child_env()
 
@@ -645,6 +657,32 @@ class ClaudeBrain:
 
     # --- conversation -------------------------------------------------------
 
+    # --- effort -------------------------------------------------------------
+
+    def set_effort_for(self, utterance: str) -> None:
+        """Pick the effort for the next question from what was said."""
+        if self.config.adaptive_effort and not self.config.local:
+            self._effort_wanted = choose_effort(utterance, self.config.effort_level())
+
+    def _reset_effort(self) -> None:
+        """A fresh process starts at the configured level, whatever came before."""
+        self._effort_now = self.config.effort_level()
+
+    def _apply_effort(self, stdin) -> None:
+        """Send the effort change ahead of the question, only if it changes.
+
+        Written to the same pipe right before the user message, so the CLI
+        reads it first. Its `control_response` is ignored by the parser like
+        any frame Vesper has no use for.
+        """
+        wanted, self._effort_wanted = self._effort_wanted, None
+        if wanted is None or wanted == self._effort_now or self.config.local:
+            return
+        self._effort_requests += 1
+        stdin.write(effort_request(wanted, f"effort-{self._effort_requests}"))
+        self._effort_now = wanted
+        self._log(f"effort {wanted or 'default'}")
+
     def interrupt(self) -> None:
         """Abandon the current turn's output. Used for barge-in.
 
@@ -675,6 +713,7 @@ class ClaudeBrain:
                 return
 
             try:
+                self._apply_effort(process.stdin)
                 process.stdin.write(encode_user_message(text))
                 process.stdin.flush()
             except (BrokenPipeError, OSError) as exc:

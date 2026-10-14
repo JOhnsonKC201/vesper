@@ -1073,3 +1073,16 @@ def test_a_superseded_prefix_does_not_stall_the_audio_loop():
     assert not transcript.ok
     assert "busy" in (transcript.rejected_reason or "")
     assert any("dropped one utterance" in w for w in ui.warnings), ui.warnings
+
+
+def test_effort_is_chosen_from_the_words_not_the_framed_turn():
+    """The payload carries a context block that would make every question look
+    long. The chooser has to see only what was said."""
+    conv, brain, _, _, speaker, _ = build(
+        replies=["Just after two."], transcripts=["Vesper, what time is it"],
+    )
+    conv._on_utterance(audio())
+    settle(speaker)
+    speaker.close()
+
+    assert brain.effort_for == "what time is it"
